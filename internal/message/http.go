@@ -36,6 +36,7 @@ func (h *HTTPHandler) Register(router gin.IRouter) {
 	router.GET("/api/v1/conversations/:conversation_id/messages", h.sync)
 	router.POST("/api/v1/messages/:msg_id/recall", h.recall)
 	router.DELETE("/api/v1/messages/:msg_id", h.delete)
+	router.PATCH("/api/v1/messages/:msg_id", h.edit)
 }
 
 type sendMessageJSON struct {
@@ -51,6 +52,11 @@ type recallMessageJSON struct {
 	SenderID uint64 `json:"sender_id"`
 }
 
+type editMessageJSON struct {
+	SenderID uint64 `json:"sender_id"`
+	Payload  string `json:"payload"`
+}
+
 type messageJSON struct {
 	ID             uint64        `json:"msg_id"`
 	ConversationID uint64        `json:"conversation_id"`
@@ -63,6 +69,7 @@ type messageJSON struct {
 	CreatedAtMs    int64         `json:"created_at_ms"`
 	Status         MessageStatus `json:"status"`
 	RecalledAtMs   int64         `json:"recalled_at_ms,omitempty"`
+	EditedAtMs     int64         `json:"edited_at_ms,omitempty"`
 }
 
 type sendMessageResponseJSON struct {
@@ -197,6 +204,45 @@ func (h *HTTPHandler) delete(c *gin.Context) {
 	httpapi.GinJSON(c, http.StatusOK, gin.H{"message": toJSON(msg)})
 }
 
+func (h *HTTPHandler) edit(c *gin.Context) {
+	msgID, err := strconv.ParseUint(c.Param("msg_id"), 10, 64)
+	if err != nil {
+		httpapi.GinError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	var body editMessageJSON
+	if err := c.ShouldBindJSON(&body); err != nil {
+		httpapi.GinError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	var senderID uint64
+	principal, ok := auth.PrincipalFromContext(c.Request.Context())
+	if ok {
+		senderID = principal.UserID
+	} else {
+		senderID = body.SenderID
+	}
+
+	payload, err := base64.StdEncoding.DecodeString(body.Payload)
+	if body.Payload != "" && err != nil {
+		httpapi.GinError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	msg, err := h.service.Edit(c.Request.Context(), EditRequest{
+		MessageID: msgID,
+		SenderID:  senderID,
+		Payload:   payload,
+	})
+	if err != nil {
+		httpapi.GinError(c, httpStatusFor(err), err)
+		return
+	}
+	httpapi.GinJSON(c, http.StatusOK, gin.H{"message": toJSON(msg)})
+}
+
 func toJSON(msg Message) messageJSON {
 	return messageJSON{
 		ID:             msg.ID,
@@ -210,6 +256,7 @@ func toJSON(msg Message) messageJSON {
 		CreatedAtMs:    msg.CreatedAtMs,
 		Status:         msg.Status,
 		RecalledAtMs:   msg.RecalledAtMs,
+		EditedAtMs:     msg.EditedAtMs,
 	}
 }
 
@@ -232,7 +279,7 @@ func httpStatusFor(err error) int {
 			return http.StatusServiceUnavailable
 		case apperrors.MsgNotFound:
 			return http.StatusNotFound
-		case apperrors.MsgRecallNotAllowed, apperrors.MsgDeleteNotAllowed:
+		case apperrors.MsgRecallNotAllowed, apperrors.MsgDeleteNotAllowed, apperrors.MsgEditNotAllowed:
 			return http.StatusForbidden
 		}
 	}

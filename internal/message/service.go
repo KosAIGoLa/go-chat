@@ -41,12 +41,19 @@ type DeleteRequest struct {
 	SenderID  uint64
 }
 
+type EditRequest struct {
+	MessageID uint64
+	SenderID  uint64
+	Payload   []byte
+}
+
 type Store interface {
 	Save(context.Context, Message) error
 	Get(ctx context.Context, msgID uint64) (Message, error)
 	ListAfter(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]Message, error)
 	Recall(ctx context.Context, msgID uint64, recalledAtMs int64) error
 	Delete(ctx context.Context, msgID uint64, deletedAtMs int64) error
+	Update(ctx context.Context, msgID uint64, newPayload []byte, editedAtMs int64) error
 }
 
 type EventPublisher interface {
@@ -159,5 +166,29 @@ func (s *Service) Delete(ctx context.Context, req DeleteRequest) (Message, error
 	}
 	msg.Status = MessageStatusDeleted
 	msg.RecalledAtMs = deletedAtMs
+	return msg, nil
+}
+
+func (s *Service) Edit(ctx context.Context, req EditRequest) (Message, error) {
+	if req.MessageID == 0 || req.SenderID == 0 {
+		return Message{}, apperrors.AppError{Code: apperrors.SysBadRequest, Message: "msg_id and sender_id are required", Retryable: false}
+	}
+	msg, err := s.store.Get(ctx, req.MessageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if msg.SenderID != req.SenderID {
+		return Message{}, apperrors.AppError{Code: apperrors.MsgEditNotAllowed, Message: "message edit not allowed", Retryable: false}
+	}
+	if msg.Status == MessageStatusDeleted || msg.Status == MessageStatusRecalled {
+		return Message{}, apperrors.AppError{Code: apperrors.MsgEditNotAllowed, Message: "message edit not allowed", Retryable: false}
+	}
+	editedAtMs := timeutil.UnixMilli()
+	if err := s.store.Update(ctx, req.MessageID, append([]byte(nil), req.Payload...), editedAtMs); err != nil {
+		return Message{}, err
+	}
+	msg.Status = MessageStatusEdited
+	msg.Payload = append([]byte(nil), req.Payload...)
+	msg.EditedAtMs = editedAtMs
 	return msg, nil
 }

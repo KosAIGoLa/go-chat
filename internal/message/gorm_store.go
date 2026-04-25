@@ -20,6 +20,7 @@ type GORMMessage struct {
 	CreatedAtMs    int64  `gorm:"index;not null"`
 	Status         uint8  `gorm:"not null;default:0"`
 	RecalledAtMs   int64  `gorm:"not null;default:0"`
+	EditedAtMs     int64  `gorm:"not null;default:0"`
 }
 
 func (GORMMessage) TableName() string { return "messages" }
@@ -47,6 +48,7 @@ func (s *GORMStore) Save(ctx context.Context, msg Message) error {
 		CreatedAtMs:    msg.CreatedAtMs,
 		Status:         uint8(msg.Status),
 		RecalledAtMs:   msg.RecalledAtMs,
+		EditedAtMs:     msg.EditedAtMs,
 	}).Error
 }
 
@@ -70,6 +72,7 @@ func (s *GORMStore) Get(ctx context.Context, msgID uint64) (Message, error) {
 		CreatedAtMs:    row.CreatedAtMs,
 		Status:         MessageStatus(row.Status),
 		RecalledAtMs:   row.RecalledAtMs,
+		EditedAtMs:     row.EditedAtMs,
 	}, nil
 }
 
@@ -97,6 +100,24 @@ func (s *GORMStore) Delete(ctx context.Context, msgID uint64, deletedAtMs int64)
 		Updates(map[string]interface{}{
 			"status":         uint8(MessageStatusDeleted),
 			"recalled_at_ms": deletedAtMs,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return apperrors.AppError{Code: apperrors.MsgNotFound}
+	}
+	return nil
+}
+
+func (s *GORMStore) Update(ctx context.Context, msgID uint64, newPayload []byte, editedAtMs int64) error {
+	result := s.db.WithContext(ctx).
+		Model(&GORMMessage{}).
+		Where("id = ?", msgID).
+		Updates(map[string]interface{}{
+			"status":       uint8(MessageStatusEdited),
+			"payload":      append([]byte(nil), newPayload...),
+			"edited_at_ms": editedAtMs,
 		})
 	if result.Error != nil {
 		return result.Error

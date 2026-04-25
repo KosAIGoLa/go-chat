@@ -15,6 +15,7 @@ const (
 	MsgNotFound         Code = "MSG_NOT_FOUND"
 	MsgRecallNotAllowed Code = "MSG_RECALL_NOT_ALLOWED"
 	MsgDeleteNotAllowed Code = "MSG_DELETE_NOT_ALLOWED"
+	MsgEditNotAllowed   Code = "MSG_EDIT_NOT_ALLOWED"
 	RouteNotFound       Code = "ROUTE_NOT_FOUND"
 	DeliverTimeout      Code = "DELIVER_TIMEOUT"
 )

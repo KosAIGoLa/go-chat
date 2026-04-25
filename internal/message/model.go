@@ -13,6 +13,7 @@ const (
 	MessageStatusNormal   MessageStatus = 0
 	MessageStatusRecalled MessageStatus = 1
 	MessageStatusDeleted  MessageStatus = 2
+	MessageStatusEdited   MessageStatus = 3
 )
 
 type Message struct {
@@ -27,4 +28,5 @@ type Message struct {
 	CreatedAtMs    int64
 	Status         MessageStatus
 	RecalledAtMs   int64
+	EditedAtMs     int64
 }

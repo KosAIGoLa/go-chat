@@ -182,3 +182,108 @@ func TestServiceDeleteRequiresIDs(t *testing.T) {
 		t.Fatalf("expected SysBadRequest, got %v", err)
 	}
 }
+
+func TestServiceEdit(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "e1", Type: 1, Payload: []byte("original"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	edited, err := svc.Edit(context.Background(), EditRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  20,
+		Payload:   []byte("updated"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected edit error: %v", err)
+	}
+	if edited.Status != MessageStatusEdited {
+		t.Fatalf("expected edited status, got %v", edited.Status)
+	}
+	if edited.EditedAtMs == 0 {
+		t.Fatal("expected non-zero EditedAtMs")
+	}
+	if string(edited.Payload) != "updated" {
+		t.Fatalf("expected payload 'updated', got %q", string(edited.Payload))
+	}
+
+	// Verify sync reflects the edit
+	msgs, err := svc.Sync(context.Background(), 10, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one message from sync")
+	}
+	if msgs[0].Status != MessageStatusEdited {
+		t.Fatalf("synced message should be edited, got status=%v", msgs[0].Status)
+	}
+	if string(msgs[0].Payload) != "updated" {
+		t.Fatalf("synced message payload should be 'updated', got %q", string(msgs[0].Payload))
+	}
+}
+
+func TestServiceEditRejectsNonSender(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "e2", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Edit(context.Background(), EditRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  21,
+		Payload:   []byte("hacked"),
+	})
+	if err == nil {
+		t.Fatal("expected error for non-sender edit")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.MsgEditNotAllowed {
+		t.Fatalf("expected MsgEditNotAllowed, got %v", err)
+	}
+}
+
+func TestServiceEditRejectsRecalledMessage(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "e3", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = svc.Recall(context.Background(), RecallRequest{MessageID: resp.Message.ID, SenderID: 20}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Edit(context.Background(), EditRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  20,
+		Payload:   []byte("edit recalled"),
+	})
+	if err == nil {
+		t.Fatal("expected error editing recalled message")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.MsgEditNotAllowed {
+		t.Fatalf("expected MsgEditNotAllowed, got %v", err)
+	}
+}
+
+func TestServiceEditRequiresIDs(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+
+	_, err := svc.Edit(context.Background(), EditRequest{})
+	if err == nil {
+		t.Fatal("expected error for empty edit request")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.SysBadRequest {
+		t.Fatalf("expected SysBadRequest, got %v", err)
+	}
+}
