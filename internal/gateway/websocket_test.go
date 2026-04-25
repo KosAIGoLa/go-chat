@@ -392,6 +392,72 @@ func TestWebSocketDeliveryAndReadAck(t *testing.T) {
 	}
 }
 
+func TestWebSocketBatchDeliveryAndReadAck(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := receipt.NewStore()
+	handler := NewWebSocketHandler().WithAuth(tokens).WithReceiptStore(store)
+	handler.now = func() time.Time { return time.UnixMilli(2345) }
+	router := gin.New()
+	handler.Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	deliveryPayload, err := json.Marshal(batchReceiptAckPayload{ConversationID: 10, Seqs: []uint64{7, 3, 9}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "batch_delivery_ack", TraceID: "batch-delivered-1", Payload: deliveryPayload}); err != nil {
+		t.Fatal(err)
+	}
+	var deliveryResp Packet
+	if err := conn.ReadJSON(&deliveryResp); err != nil {
+		t.Fatal(err)
+	}
+	if deliveryResp.Command != "batch_delivery_ack_response" || deliveryResp.TraceID != "batch-delivered-1" {
+		t.Fatalf("unexpected batch delivery ack response: %+v", deliveryResp)
+	}
+	var delivered receiptAckResponsePayload
+	if err := json.Unmarshal(deliveryResp.Payload, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.ConversationID != 10 || delivered.DeliveredSeq != 9 || delivered.ReadSeq != 0 || delivered.UpdatedAtMs != 2345 {
+		t.Fatalf("unexpected batch delivered receipt: %+v", delivered)
+	}
+
+	readPayload, err := json.Marshal(batchReceiptAckPayload{ConversationID: 10, Seqs: []uint64{8, 11, 10}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "batch_read_ack", TraceID: "batch-read-1", Payload: readPayload}); err != nil {
+		t.Fatal(err)
+	}
+	var readResp Packet
+	if err := conn.ReadJSON(&readResp); err != nil {
+		t.Fatal(err)
+	}
+	if readResp.Command != "batch_read_ack_response" || readResp.TraceID != "batch-read-1" {
+		t.Fatalf("unexpected batch read ack response: %+v", readResp)
+	}
+	var read receiptAckResponsePayload
+	if err := json.Unmarshal(readResp.Payload, &read); err != nil {
+		t.Fatal(err)
+	}
+	if read.DeliveredSeq != 11 || read.ReadSeq != 11 || read.UpdatedAtMs != 2345 {
+		t.Fatalf("unexpected batch read receipt: %+v", read)
+	}
+	stored, ok := store.Get(10, 42, "ios")
+	if !ok || stored.DeliveredSeq != 11 || stored.ReadSeq != 11 {
+		t.Fatalf("unexpected stored batch receipt: %+v ok=%v", stored, ok)
+	}
+}
+
 func TestWebSocketReceiptAckValidationError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -421,6 +487,38 @@ func TestWebSocketReceiptAckValidationError(t *testing.T) {
 	}
 	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
 		t.Fatalf("unexpected receipt error response: %+v", resp)
+	}
+}
+
+func TestWebSocketBatchReceiptAckValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewWebSocketHandler().WithReceiptStore(receipt.NewStore()).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws")
+	defer conn.Close()
+
+	payload, err := json.Marshal(batchReceiptAckPayload{Seqs: []uint64{1, 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "batch_delivery_ack", TraceID: "bad-batch-receipt", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "error" || pkt.TraceID != "bad-batch-receipt" {
+		t.Fatalf("unexpected error packet: %+v", pkt)
+	}
+	var resp errorPayload
+	if err := json.Unmarshal(pkt.Payload, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
+		t.Fatalf("unexpected batch receipt error response: %+v", resp)
 	}
 }
 
@@ -617,6 +715,52 @@ func TestWebSocketDeleteMessage(t *testing.T) {
 	}
 }
 
+func TestWebSocketEditMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := message.NewService(sequence.NewAllocator(), message.NewMemoryStore())
+	sendResp, err := svc.Send(context.Background(), message.SendRequest{
+		ConversationID: 10, SenderID: 42, SenderDeviceID: "ios", ClientMsgID: "edit-ws-1", Type: 1, Payload: []byte("original"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Message.ID
+
+	router := gin.New()
+	NewWebSocketHandler().WithAuth(tokens).WithMessageSender(svc).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	payload, err := json.Marshal(editMessagePayload{MessageID: msgID, Payload: "dXBkYXRlZA=="})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "edit_message", TraceID: "edit-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "edit_message_ack" || pkt.TraceID != "edit-1" {
+		t.Fatalf("unexpected edit ack packet: %+v", pkt)
+	}
+	var ack editMessageAckPayload
+	if err := json.Unmarshal(pkt.Payload, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.MessageID != msgID || ack.Status != message.MessageStatusEdited || ack.Payload != "dXBkYXRlZA==" || ack.EditedAtMs == 0 {
+		t.Fatalf("unexpected edit ack payload: %+v", ack)
+	}
+}
+
 func TestWebSocketRouteRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -657,5 +801,9 @@ func (errorSender) Recall(context.Context, message.RecallRequest) (message.Messa
 }
 
 func (errorSender) Delete(context.Context, message.DeleteRequest) (message.Message, error) {
+	return message.Message{}, nil
+}
+
+func (errorSender) Edit(context.Context, message.EditRequest) (message.Message, error) {
 	return message.Message{}, nil
 }

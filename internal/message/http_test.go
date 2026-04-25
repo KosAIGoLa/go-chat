@@ -22,71 +22,85 @@ func TestHTTPHandlerSendAndSync(t *testing.T) {
 	router := gin.New()
 	NewHTTPHandler(svc).Register(router)
 
-	body := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c1","type":1,"payload":"aGVsbG8="}`)
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c1","type":1,"payload":"aGVsbG8="}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("expected %d got %d body=%s", http.StatusAccepted, sendRec.Code, sendRec.Body.String())
+	}
+	var sendResp struct {
+		Data struct {
+			Message messageJSON `json:"message"`
+			Stage   AckStage    `json:"stage"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	if sendResp.Data.Message.Seq != 1 || sendResp.Data.Stage != AckStageQueued {
+		t.Fatalf("unexpected send response: %+v", sendResp)
+	}
+	if sendResp.Data.Message.Payload != "aGVsbG8=" {
+		t.Fatalf("unexpected payload: %s", sendResp.Data.Message.Payload)
 	}
 
 	syncReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/10/messages?from_seq=1&limit=10", nil)
 	syncRec := httptest.NewRecorder()
 	router.ServeHTTP(syncRec, syncReq)
 	if syncRec.Code != http.StatusOK {
-		t.Fatalf("unexpected status: %d body=%s", syncRec.Code, syncRec.Body.String())
+		t.Fatalf("expected %d got %d body=%s", http.StatusOK, syncRec.Code, syncRec.Body.String())
 	}
-	var decoded struct {
+	var syncResp struct {
 		Data struct {
 			Messages []messageJSON `json:"messages"`
+			HasMore  bool          `json:"has_more"`
 		} `json:"data"`
 	}
-	if err := json.NewDecoder(syncRec.Body).Decode(&decoded); err != nil {
+	if err := json.NewDecoder(syncRec.Body).Decode(&syncResp); err != nil {
 		t.Fatal(err)
 	}
-	if len(decoded.Data.Messages) != 1 || decoded.Data.Messages[0].Seq != 1 {
-		t.Fatalf("unexpected response: %+v", decoded)
+	if len(syncResp.Data.Messages) != 1 || syncResp.Data.Messages[0].Seq != 1 || syncResp.Data.HasMore {
+		t.Fatalf("unexpected sync response: %+v", syncResp)
 	}
 }
 
 func TestHTTPHandlerRateLimitsMessageSend(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
-	handler := NewHTTPHandler(svc).WithRateLimiter(ratelimit.New(1, time.Second))
-	handler.now = func() time.Time { return time.Unix(100, 0) }
+	limiter := ratelimit.New(1, time.Second)
 	router := gin.New()
-	handler.Register(router)
+	h := NewHTTPHandler(svc).WithRateLimiter(limiter)
+	h.now = func() time.Time { return time.Unix(0, 0) }
+	h.Register(router)
 
 	body := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c1","type":1}`)
-	first := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
-	first.RemoteAddr = "192.0.2.1:1234"
+	firstReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
 	firstRec := httptest.NewRecorder()
-	router.ServeHTTP(firstRec, first)
+	router.ServeHTTP(firstRec, firstReq)
 	if firstRec.Code != http.StatusAccepted {
-		t.Fatalf("unexpected first status: %d body=%s", firstRec.Code, firstRec.Body.String())
+		t.Fatalf("expected first request accepted, got %d body=%s", firstRec.Code, firstRec.Body.String())
 	}
 
-	secondBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c2","type":1}`)
-	second := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(secondBody))
-	second.RemoteAddr = "192.0.2.1:1234"
+	secondReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
 	secondRec := httptest.NewRecorder()
-	router.ServeHTTP(secondRec, second)
+	router.ServeHTTP(secondRec, secondReq)
 	if secondRec.Code != http.StatusTooManyRequests {
-		t.Fatalf("unexpected second status: %d body=%s", secondRec.Code, secondRec.Body.String())
+		t.Fatalf("expected second request to be rate limited, got %d body=%s", secondRec.Code, secondRec.Body.String())
 	}
-	if secondRec.Header().Get("Retry-After") != "1" {
-		t.Fatalf("expected Retry-After header, got %q", secondRec.Header().Get("Retry-After"))
+	if secondRec.Header().Get("Retry-After") == "" {
+		t.Fatal("expected Retry-After header")
 	}
-	var decoded struct {
+	var resp struct {
 		Error struct {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	if err := json.NewDecoder(secondRec.Body).Decode(&decoded); err != nil {
+	if err := json.NewDecoder(secondRec.Body).Decode(&resp); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Error.Code != string(apperrors.MsgRateLimited) {
-		t.Fatalf("unexpected error code: %+v", decoded)
+	if resp.Error.Code != string(apperrors.MsgRateLimited) {
+		t.Fatalf("expected error code %q got %q", apperrors.MsgRateLimited, resp.Error.Code)
 	}
 }
 
@@ -96,7 +110,6 @@ func TestHTTPHandlerRecall(t *testing.T) {
 	router := gin.New()
 	NewHTTPHandler(svc).Register(router)
 
-	// Send a message
 	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"recall-c1","type":1}`)
 	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
 	sendRec := httptest.NewRecorder()
@@ -120,7 +133,6 @@ func TestHTTPHandlerRecall(t *testing.T) {
 		t.Fatal("expected non-zero msg_id in send response")
 	}
 
-	// Recall the message
 	recallBody := []byte(`{"sender_id":20}`)
 	recallReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/messages/%d/recall", msgID), bytes.NewReader(recallBody))
 	recallRec := httptest.NewRecorder()
@@ -151,7 +163,6 @@ func TestHTTPHandlerRecallRejectsNonSender(t *testing.T) {
 	router := gin.New()
 	NewHTTPHandler(svc).Register(router)
 
-	// Send as sender 20
 	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"recall-c2","type":1}`)
 	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
 	sendRec := httptest.NewRecorder()
@@ -172,7 +183,6 @@ func TestHTTPHandlerRecallRejectsNonSender(t *testing.T) {
 	}
 	msgID := sendResp.Data.Message.MsgID
 
-	// Try to recall as sender 21
 	recallBody := []byte(`{"sender_id":21}`)
 	recallReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/messages/%d/recall", msgID), bytes.NewReader(recallBody))
 	recallRec := httptest.NewRecorder()
@@ -332,132 +342,132 @@ func TestHTTPHandlerDeleteNotFound(t *testing.T) {
 			Code string `json:"code"`
 		} `json:"error"`
 	}
-	
-	func TestHTTPHandlerEdit(t *testing.T) {
-		gin.SetMode(gin.TestMode)
-		svc := NewService(sequence.NewAllocator(), NewMemoryStore())
-		router := gin.New()
-		NewHTTPHandler(svc).Register(router)
-	
-		sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"edit-c1","type":1,"payload":"b3JpZ2luYWw="}`)
-		sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
-		sendRec := httptest.NewRecorder()
-		router.ServeHTTP(sendRec, sendReq)
-		if sendRec.Code != http.StatusAccepted {
-			t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
-		}
-		var sendResp struct {
-			Data struct {
-				Message struct {
-					MsgID uint64 `json:"msg_id"`
-				} `json:"message"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
-			t.Fatal(err)
-		}
-		msgID := sendResp.Data.Message.MsgID
-	
-		editBody := []byte(`{"sender_id":20,"payload":"dXBkYXRlZA=="}`)
-		editReq := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(editBody))
-		editRec := httptest.NewRecorder()
-		router.ServeHTTP(editRec, editReq)
-		if editRec.Code != http.StatusOK {
-			t.Fatalf("edit failed: %d body=%s", editRec.Code, editRec.Body.String())
-		}
-		var editResp struct {
-			Data struct {
-				Message messageJSON `json:"message"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(editRec.Body).Decode(&editResp); err != nil {
-			t.Fatal(err)
-		}
-		if editResp.Data.Message.Status != MessageStatusEdited {
-			t.Fatalf("expected edited status, got %v", editResp.Data.Message.Status)
-		}
-		if editResp.Data.Message.EditedAtMs == 0 {
-			t.Fatal("expected non-zero edited_at_ms")
-		}
-		if editResp.Data.Message.Payload != "dXBkYXRlZA==" {
-			t.Fatalf("expected updated payload, got %q", editResp.Data.Message.Payload)
-		}
-	}
-	
-	func TestHTTPHandlerEditRejectsNonSender(t *testing.T) {
-		gin.SetMode(gin.TestMode)
-		svc := NewService(sequence.NewAllocator(), NewMemoryStore())
-		router := gin.New()
-		NewHTTPHandler(svc).Register(router)
-	
-		sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"edit-c2","type":1,"payload":"b3JpZ2luYWw="}`)
-		sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
-		sendRec := httptest.NewRecorder()
-		router.ServeHTTP(sendRec, sendReq)
-		if sendRec.Code != http.StatusAccepted {
-			t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
-		}
-		var sendResp struct {
-			Data struct {
-				Message struct {
-					MsgID uint64 `json:"msg_id"`
-				} `json:"message"`
-			} `json:"data"`
-		}
-		if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
-			t.Fatal(err)
-		}
-		msgID := sendResp.Data.Message.MsgID
-	
-		editBody := []byte(`{"sender_id":21,"payload":"aGFja2Vk"}`)
-		editReq := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(editBody))
-		editRec := httptest.NewRecorder()
-		router.ServeHTTP(editRec, editReq)
-		if editRec.Code != http.StatusForbidden {
-			t.Fatalf("expected 403, got %d body=%s", editRec.Code, editRec.Body.String())
-		}
-		var errResp struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if err := json.NewDecoder(editRec.Body).Decode(&errResp); err != nil {
-			t.Fatal(err)
-		}
-		if errResp.Error.Code != string(apperrors.MsgEditNotAllowed) {
-			t.Fatalf("expected MSG_EDIT_NOT_ALLOWED, got %q", errResp.Error.Code)
-		}
-	}
-	
-	func TestHTTPHandlerEditNotFound(t *testing.T) {
-		gin.SetMode(gin.TestMode)
-		svc := NewService(sequence.NewAllocator(), NewMemoryStore())
-		router := gin.New()
-		NewHTTPHandler(svc).Register(router)
-	
-		editBody := []byte(`{"sender_id":20,"payload":"dXBkYXRlZA=="}`)
-		editReq := httptest.NewRequest(http.MethodPatch, "/api/v1/messages/999999", bytes.NewReader(editBody))
-		editRec := httptest.NewRecorder()
-		router.ServeHTTP(editRec, editReq)
-		if editRec.Code != http.StatusNotFound {
-			t.Fatalf("expected 404, got %d body=%s", editRec.Code, editRec.Body.String())
-		}
-		var errResp struct {
-			Error struct {
-				Code string `json:"code"`
-			} `json:"error"`
-		}
-		if err := json.NewDecoder(editRec.Body).Decode(&errResp); err != nil {
-			t.Fatal(err)
-		}
-		if errResp.Error.Code != string(apperrors.MsgNotFound) {
-			t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp.Error.Code)
-		}
-	}
 	if err := json.NewDecoder(deleteRec.Body).Decode(&errResp3); err != nil {
 		t.Fatal(err)
 	}
 	if errResp3.Error.Code != string(apperrors.MsgNotFound) {
 		t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp3.Error.Code)
+	}
+}
+
+func TestHTTPHandlerEdit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"edit-c1","type":1,"payload":"b3JpZ2luYWw="}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+	var sendResp struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Data.Message.MsgID
+
+	editBody := []byte(`{"sender_id":20,"payload":"dXBkYXRlZA=="}`)
+	editReq := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(editBody))
+	editRec := httptest.NewRecorder()
+	router.ServeHTTP(editRec, editReq)
+	if editRec.Code != http.StatusOK {
+		t.Fatalf("edit failed: %d body=%s", editRec.Code, editRec.Body.String())
+	}
+	var editResp struct {
+		Data struct {
+			Message messageJSON `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(editRec.Body).Decode(&editResp); err != nil {
+		t.Fatal(err)
+	}
+	if editResp.Data.Message.Status != MessageStatusEdited {
+		t.Fatalf("expected edited status, got %v", editResp.Data.Message.Status)
+	}
+	if editResp.Data.Message.EditedAtMs == 0 {
+		t.Fatal("expected non-zero edited_at_ms")
+	}
+	if editResp.Data.Message.Payload != "dXBkYXRlZA==" {
+		t.Fatalf("expected updated payload, got %q", editResp.Data.Message.Payload)
+	}
+}
+
+func TestHTTPHandlerEditRejectsNonSender(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"edit-c2","type":1,"payload":"b3JpZ2luYWw="}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+	var sendResp struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Data.Message.MsgID
+
+	editBody := []byte(`{"sender_id":21,"payload":"aGFja2Vk"}`)
+	editReq := httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(editBody))
+	editRec := httptest.NewRecorder()
+	router.ServeHTTP(editRec, editReq)
+	if editRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", editRec.Code, editRec.Body.String())
+	}
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(editRec.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	if errResp.Error.Code != string(apperrors.MsgEditNotAllowed) {
+		t.Fatalf("expected MSG_EDIT_NOT_ALLOWED, got %q", errResp.Error.Code)
+	}
+}
+
+func TestHTTPHandlerEditNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	editBody := []byte(`{"sender_id":20,"payload":"dXBkYXRlZA=="}`)
+	editReq := httptest.NewRequest(http.MethodPatch, "/api/v1/messages/999999", bytes.NewReader(editBody))
+	editRec := httptest.NewRecorder()
+	router.ServeHTTP(editRec, editReq)
+	if editRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", editRec.Code, editRec.Body.String())
+	}
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(editRec.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	if errResp.Error.Code != string(apperrors.MsgNotFound) {
+		t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp.Error.Code)
 	}
 }

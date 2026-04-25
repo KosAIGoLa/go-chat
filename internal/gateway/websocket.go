@@ -33,11 +33,14 @@ type MessageService interface {
 	Sync(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]message.Message, error)
 	Recall(ctx context.Context, req message.RecallRequest) (message.Message, error)
 	Delete(ctx context.Context, req message.DeleteRequest) (message.Message, error)
+	Edit(ctx context.Context, req message.EditRequest) (message.Message, error)
 }
 
 type ReceiptStore interface {
 	MarkDelivered(conversationID, userID uint64, deviceID string, seq uint64, updatedAtMs int64) receipt.Receipt
 	MarkRead(conversationID, userID uint64, deviceID string, seq uint64, updatedAtMs int64) receipt.Receipt
+	MarkDeliveredBatch(conversationID, userID uint64, deviceID string, seqs []uint64, updatedAtMs int64) receipt.Receipt
+	MarkReadBatch(conversationID, userID uint64, deviceID string, seqs []uint64, updatedAtMs int64) receipt.Receipt
 }
 
 type PresenceStore interface {
@@ -265,12 +268,18 @@ func (c *wsClient) loop(ctx context.Context, onSeen func()) {
 			c.handleReceiptAck(pkt, false)
 		case "read_ack":
 			c.handleReceiptAck(pkt, true)
+		case "batch_delivery_ack":
+			c.handleBatchReceiptAck(pkt, false)
+		case "batch_read_ack":
+			c.handleBatchReceiptAck(pkt, true)
 		case "presence_subscribe":
 			c.handlePresenceSubscribe(pkt)
 		case "recall_message":
 			c.handleRecallMessage(ctx, pkt)
 		case "delete_message":
 			c.handleDeleteMessage(ctx, pkt)
+		case "edit_message":
+			c.handleEditMessage(ctx, pkt)
 		default:
 			c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), "unsupported command", false)
 		}
@@ -320,10 +329,22 @@ type recallMessagePayload struct {
 	MessageID uint64 `json:"msg_id"`
 }
 
+type editMessagePayload struct {
+	MessageID uint64 `json:"msg_id"`
+	Payload   string `json:"payload"`
+}
+
 type recallMessageAckPayload struct {
 	MessageID    uint64                `json:"msg_id"`
 	Status       message.MessageStatus `json:"status"`
 	RecalledAtMs int64                 `json:"recalled_at_ms"`
+}
+
+type editMessageAckPayload struct {
+	MessageID  uint64                `json:"msg_id"`
+	Status     message.MessageStatus `json:"status"`
+	Payload    string                `json:"payload"`
+	EditedAtMs int64                 `json:"edited_at_ms"`
 }
 
 type receiptAckPayload struct {
@@ -516,6 +537,50 @@ func (c *wsClient) handleDeleteMessage(ctx context.Context, pkt Packet) {
 	})
 }
 
+func (c *wsClient) handleEditMessage(ctx context.Context, pkt Packet) {
+	if c.messages == nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysUnavailable), "message service is unavailable", true)
+		return
+	}
+	var payload editMessagePayload
+	if err := json.Unmarshal(pkt.Payload, &payload); err != nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), err.Error(), false)
+		return
+	}
+	if payload.MessageID == 0 {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), "msg_id is required", false)
+		return
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload.Payload)
+	if payload.Payload != "" && err != nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), err.Error(), false)
+		return
+	}
+	msg, err := c.messages.Edit(ctx, message.EditRequest{
+		MessageID: payload.MessageID,
+		SenderID:  c.principal.UserID,
+		Payload:   decoded,
+	})
+	if err != nil {
+		code := string(apperrors.SysInternal)
+		messageText := "internal error"
+		retryable := true
+		if appErr, ok := err.(apperrors.AppError); ok {
+			code = string(appErr.Code)
+			messageText = appErr.Message
+			retryable = appErr.Retryable
+		}
+		c.writeError(pkt.TraceID, code, messageText, retryable)
+		return
+	}
+	c.writeJSON("edit_message_ack", pkt.TraceID, editMessageAckPayload{
+		MessageID:  msg.ID,
+		Status:     msg.Status,
+		Payload:    base64.StdEncoding.EncodeToString(msg.Payload),
+		EditedAtMs: msg.EditedAtMs,
+	})
+}
+
 func clientKey(userID uint64, deviceID string) string {
 	return fmt.Sprintf("%d:%s", userID, deviceID)
 }
@@ -571,6 +636,37 @@ func (c *wsClient) handleReceiptAck(pkt Packet, read bool) {
 		command = "read_ack_response"
 	} else {
 		r = c.receipts.MarkDelivered(payload.ConversationID, c.principal.UserID, c.principal.DeviceID, payload.Seq, updatedAtMs)
+	}
+	c.writeJSON(command, pkt.TraceID, receiptAckResponsePayload{ConversationID: r.ConversationID, DeliveredSeq: r.DeliveredSeq, ReadSeq: r.ReadSeq, UpdatedAtMs: r.UpdatedAtMs})
+}
+
+type batchReceiptAckPayload struct {
+	ConversationID uint64   `json:"conversation_id"`
+	Seqs           []uint64 `json:"seqs"`
+}
+
+func (c *wsClient) handleBatchReceiptAck(pkt Packet, read bool) {
+	if c.receipts == nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysUnavailable), "receipt store is unavailable", true)
+		return
+	}
+	var payload batchReceiptAckPayload
+	if err := json.Unmarshal(pkt.Payload, &payload); err != nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), err.Error(), false)
+		return
+	}
+	if payload.ConversationID == 0 || len(payload.Seqs) == 0 {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), "conversation_id and seqs are required", false)
+		return
+	}
+	updatedAtMs := c.now().UnixMilli()
+	var r receipt.Receipt
+	command := "batch_delivery_ack_response"
+	if read {
+		r = c.receipts.MarkReadBatch(payload.ConversationID, c.principal.UserID, c.principal.DeviceID, payload.Seqs, updatedAtMs)
+		command = "batch_read_ack_response"
+	} else {
+		r = c.receipts.MarkDeliveredBatch(payload.ConversationID, c.principal.UserID, c.principal.DeviceID, payload.Seqs, updatedAtMs)
 	}
 	c.writeJSON(command, pkt.TraceID, receiptAckResponsePayload{ConversationID: r.ConversationID, DeliveredSeq: r.DeliveredSeq, ReadSeq: r.ReadSeq, UpdatedAtMs: r.UpdatedAtMs})
 }

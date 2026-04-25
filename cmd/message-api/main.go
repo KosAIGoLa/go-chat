@@ -10,6 +10,7 @@ import (
 
 	"github.com/ck-chat/ck-chat/internal/app"
 	"github.com/ck-chat/ck-chat/internal/auth"
+	"github.com/ck-chat/ck-chat/internal/conversation"
 	"github.com/ck-chat/ck-chat/internal/message"
 	"github.com/ck-chat/ck-chat/internal/sequence"
 )
@@ -37,9 +38,11 @@ func run(ctx context.Context, rt app.Runtime) error {
 	router := gin.New()
 	router.Use(gin.Recovery())
 	auth.NewHTTPHandler(tokens, ttl).Register(router)
+	convStore := conversation.NewStore()
 	protected := router.Group("/")
 	protected.Use(auth.Middleware(tokens))
 	message.NewHTTPHandler(svc).Register(protected)
+	conversation.NewHTTPHandler(convStore).Register(protected)
 	router.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	router.GET("/readyz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ready"}) })
 

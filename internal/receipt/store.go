@@ -51,3 +51,37 @@ func (s *Store) Get(conversationID, userID uint64, deviceID string) (Receipt, bo
 	r, ok := s.receipts[key{conversationID: conversationID, userID: userID, deviceID: deviceID}]
 	return r, ok
 }
+
+// MarkDeliveredBatch records the maximum seq from seqs as the new delivered
+// cursor for the given device. Seqs that are lower than the current cursor are
+// ignored (monotonic). If seqs is empty the call is a no-op and the current
+// receipt is returned unchanged.
+func (s *Store) MarkDeliveredBatch(conversationID, userID uint64, deviceID string, seqs []uint64, updatedAtMs int64) Receipt {
+	if len(seqs) == 0 {
+		r, _ := s.Get(conversationID, userID, deviceID)
+		return r
+	}
+	var maxSeq uint64
+	for _, seq := range seqs {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return s.MarkDelivered(conversationID, userID, deviceID, maxSeq, updatedAtMs)
+}
+
+// MarkReadBatch records the maximum seq from seqs as the new read cursor for
+// the given device (also advances delivered if needed).
+func (s *Store) MarkReadBatch(conversationID, userID uint64, deviceID string, seqs []uint64, updatedAtMs int64) Receipt {
+	if len(seqs) == 0 {
+		r, _ := s.Get(conversationID, userID, deviceID)
+		return r
+	}
+	var maxSeq uint64
+	for _, seq := range seqs {
+		if seq > maxSeq {
+			maxSeq = seq
+		}
+	}
+	return s.MarkRead(conversationID, userID, deviceID, maxSeq, updatedAtMs)
+}
