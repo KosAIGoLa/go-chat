@@ -761,6 +761,166 @@ func TestWebSocketEditMessage(t *testing.T) {
 	}
 }
 
+func TestWebSocketSendMessageSyncsToSenderOtherDevices(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	iosToken, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcToken, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "pc"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := message.NewService(sequence.NewAllocator(), message.NewMemoryStore())
+
+	router := gin.New()
+	NewWebSocketHandler().WithAuth(tokens).WithMessageSender(svc).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	iosConn := dialWebSocket(t, server.URL, "/ws?access_token="+iosToken)
+	defer iosConn.Close()
+	pcConn := dialWebSocket(t, server.URL, "/ws?access_token="+pcToken)
+	defer pcConn.Close()
+
+	sendPayload, err := json.Marshal(sendMessagePayload{ConversationID: 10, ClientMsgID: "own-sync-1", Type: 1, Payload: base64.StdEncoding.EncodeToString([]byte("hello-self-sync"))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := iosConn.WriteJSON(Packet{Command: "send_message", TraceID: "send-own-sync-1", Payload: sendPayload}); err != nil {
+		t.Fatal(err)
+	}
+
+	var ackPkt Packet
+	if err := iosConn.ReadJSON(&ackPkt); err != nil {
+		t.Fatal(err)
+	}
+	if ackPkt.Command != "send_message_ack" || ackPkt.TraceID != "send-own-sync-1" {
+		t.Fatalf("unexpected send ack packet: %+v", ackPkt)
+	}
+	var ack sendMessageAckPayload
+	if err := json.Unmarshal(ackPkt.Payload, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.ConversationID != 10 || ack.ClientMsgID != "own-sync-1" || ack.MsgID == 0 || ack.Seq == 0 {
+		t.Fatalf("unexpected send ack payload: %+v", ack)
+	}
+
+	var pushPkt Packet
+	if err := pcConn.ReadJSON(&pushPkt); err != nil {
+		t.Fatal(err)
+	}
+	if pushPkt.Command != "push_message" {
+		t.Fatalf("unexpected sender sync packet: %+v", pushPkt)
+	}
+	var pushed messagePayload
+	if err := json.Unmarshal(pushPkt.Payload, &pushed); err != nil {
+		t.Fatal(err)
+	}
+	if pushed.ConversationID != 10 || pushed.ClientMsgID != "own-sync-1" || pushed.SenderID != 42 || pushed.SenderDeviceID != "ios" {
+		t.Fatalf("unexpected synced message payload: %+v", pushed)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(pushed.Payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decoded) != "hello-self-sync" {
+		t.Fatalf("unexpected synced payload body: %q", decoded)
+	}
+}
+
+func TestWebSocketPresenceChangePushedToSubscribers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	// watcher: user 99 watching user 7
+	watcherToken, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 99, DeviceID: "phone"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// subject: user 7, two connections
+	user7Token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 7, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	presenceStore := presence.NewStore()
+	router := gin.New()
+	NewWebSocketHandler().WithAuth(tokens).WithPresenceStore(presenceStore).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	// watcher connects first
+	watcherConn := dialWebSocket(t, server.URL, "/ws?access_token="+watcherToken)
+	defer watcherConn.Close()
+
+	// watcher subscribes to user 7's presence
+	subPayload, err := json.Marshal(presenceSubscribePayload{UserIDs: []uint64{7}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := watcherConn.WriteJSON(Packet{Command: "presence_subscribe", TraceID: "sub-1", Payload: subPayload}); err != nil {
+		t.Fatal(err)
+	}
+	var subResp Packet
+	if err := watcherConn.ReadJSON(&subResp); err != nil {
+		t.Fatal(err)
+	}
+	if subResp.Command != "presence_subscribe_response" {
+		t.Fatalf("expected presence_subscribe_response, got %+v", subResp)
+	}
+	// Verify initial snapshot: user 7 is offline
+	var initResp presenceSubscribeResponsePayload
+	if err := json.Unmarshal(subResp.Payload, &initResp); err != nil {
+		t.Fatal(err)
+	}
+	if len(initResp.Events) != 1 || initResp.Events[0].Status != presence.StatusOffline {
+		t.Fatalf("expected user 7 offline initially, got %+v", initResp)
+	}
+
+	// user 7 connects → triggers Online + notifyPresenceChange
+	user7Conn := dialWebSocket(t, server.URL, "/ws?access_token="+user7Token)
+	defer user7Conn.Close()
+
+	// watcher should receive a presence_changed packet
+	_ = watcherConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var changePkt Packet
+	if err := watcherConn.ReadJSON(&changePkt); err != nil {
+		t.Fatalf("expected presence_changed packet: %v", err)
+	}
+	if changePkt.Command != "presence_changed" {
+		t.Fatalf("expected presence_changed command, got %q", changePkt.Command)
+	}
+	var changeEvent presenceEventPayload
+	if err := json.Unmarshal(changePkt.Payload, &changeEvent); err != nil {
+		t.Fatal(err)
+	}
+	if changeEvent.UserID != 7 || changeEvent.Status != presence.StatusOnline {
+		t.Fatalf("expected user 7 online in presence_changed, got %+v", changeEvent)
+	}
+
+	// user 7 disconnects → triggers Offline + notifyPresenceChange
+	_ = user7Conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+	user7Conn.Close()
+
+	// watcher should receive another presence_changed packet (offline)
+	_ = watcherConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var offlinePkt Packet
+	if err := watcherConn.ReadJSON(&offlinePkt); err != nil {
+		t.Fatalf("expected offline presence_changed packet: %v", err)
+	}
+	if offlinePkt.Command != "presence_changed" {
+		t.Fatalf("expected presence_changed command, got %q", offlinePkt.Command)
+	}
+	var offlineEvent presenceEventPayload
+	if err := json.Unmarshal(offlinePkt.Payload, &offlineEvent); err != nil {
+		t.Fatal(err)
+	}
+	if offlineEvent.UserID != 7 || offlineEvent.Status != presence.StatusOffline {
+		t.Fatalf("expected user 7 offline in presence_changed, got %+v", offlineEvent)
+	}
+}
+
 func TestWebSocketRouteRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

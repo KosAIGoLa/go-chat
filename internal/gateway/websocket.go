@@ -49,6 +49,11 @@ type PresenceStore interface {
 	Snapshot(userID uint64) presence.Snapshot
 }
 
+// presenceSubsKey returns the map key for a watched user's subscriber set.
+func presenceSubsKey(watchedUserID uint64) string {
+	return fmt.Sprintf("psub:%d", watchedUserID)
+}
+
 type WebSocketHandler struct {
 	gatewayID string
 	tokens    *auth.TokenService
@@ -58,7 +63,9 @@ type WebSocketHandler struct {
 	presence  PresenceStore
 	upgrader  websocket.Upgrader
 	clients   sync.Map
-	now       func() time.Time
+	// presenceSubs maps watchedUserID (as presenceSubsKey) → sync.Map{clientID → *wsClient}
+	presenceSubs sync.Map
+	now          func() time.Time
 }
 
 func NewWebSocketHandler() *WebSocketHandler {
@@ -122,7 +129,30 @@ func (h *WebSocketHandler) serve(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	client := newClient(conn, principal, h.messages, h.receipts, h.presence, h.now)
+	client := newClient(conn, principal, h.messages, h.receipts, h.presence, h.now, h)
+	// Wire sender-side multi-device sync: push the sent message to the sender's
+	// other connected devices by ranging over h.clients, skipping this device.
+	client.syncPusher = func(msg message.Message) {
+		myID := client.id
+		myDeviceID := client.principal.DeviceID
+		senderUserID := msg.SenderID
+		seen := map[string]struct{}{myID: {}}
+		h.clients.Range(func(_, value any) bool {
+			other, ok := value.(*wsClient)
+			if !ok || other == nil {
+				return true
+			}
+			if other.principal.UserID != senderUserID || other.principal.DeviceID == myDeviceID {
+				return true
+			}
+			if _, dup := seen[other.id]; dup {
+				return true
+			}
+			seen[other.id] = struct{}{}
+			other.writeJSON("push_message", "", toMessagePayload(msg))
+			return true
+		})
+	}
 	h.clients.Store(client.id, client)
 	h.clients.Store(clientKey(principal.UserID, principal.DeviceID), client)
 	if h.routes != nil {
@@ -130,6 +160,7 @@ func (h *WebSocketHandler) serve(c *gin.Context) {
 	}
 	if h.presence != nil {
 		h.presence.Online(principal.UserID, presence.Device{DeviceID: principal.DeviceID, GatewayID: h.gatewayID, SeenAt: h.now()})
+		h.notifyPresenceChange(principal.UserID)
 	}
 	defer func() {
 		if h.routes != nil {
@@ -137,17 +168,21 @@ func (h *WebSocketHandler) serve(c *gin.Context) {
 		}
 		if h.presence != nil {
 			h.presence.Offline(principal.UserID, principal.DeviceID)
+			h.notifyPresenceChange(principal.UserID)
 		}
+		client.unsubscribeAll()
 		h.clients.Delete(client.id)
 		h.clients.Delete(clientKey(principal.UserID, principal.DeviceID))
 		_ = conn.Close()
 	}()
 	client.loop(c.Request.Context(), func() {
+		now := h.now()
 		if h.routes != nil {
-			h.registerRoute(principal, client.id)
+			h.routes.UpdateLastSeen(principal.UserID, principal.DeviceID, now.UnixMilli())
 		}
 		if h.presence != nil {
-			h.presence.Online(principal.UserID, presence.Device{DeviceID: principal.DeviceID, GatewayID: h.gatewayID, SeenAt: h.now()})
+			h.presence.Online(principal.UserID, presence.Device{DeviceID: principal.DeviceID, GatewayID: h.gatewayID, SeenAt: now})
+			h.notifyPresenceChange(principal.UserID)
 		}
 	})
 }
@@ -224,11 +259,28 @@ type wsClient struct {
 	messages  MessageService
 	receipts  ReceiptStore
 	presence  PresenceStore
+	handler   *WebSocketHandler
 	now       func() time.Time
+	// syncPusher is called after a successful send_message to push the message
+	// to the sender's other connected devices (sender-side multi-device sync).
+	// It is set by serve() as a closure over the handler's clients map.
+	syncPusher func(msg message.Message)
+	// subscribedTo tracks userIDs this client subscribed to for presence push,
+	// so we can clean up subscriptions on disconnect.
+	subscribedTo []uint64
 }
 
-func newClient(conn *websocket.Conn, principal auth.Principal, sender MessageService, receipts ReceiptStore, presenceStore PresenceStore, now func() time.Time) *wsClient {
-	return &wsClient{id: fmt.Sprintf("%d-%d-%s", principal.UserID, time.Now().UnixNano(), principal.DeviceID), conn: conn, principal: principal, messages: sender, receipts: receipts, presence: presenceStore, now: now}
+func newClient(conn *websocket.Conn, principal auth.Principal, sender MessageService, receipts ReceiptStore, presenceStore PresenceStore, now func() time.Time, h *WebSocketHandler) *wsClient {
+	return &wsClient{
+		id:        fmt.Sprintf("%d-%d-%s", principal.UserID, time.Now().UnixNano(), principal.DeviceID),
+		conn:      conn,
+		principal: principal,
+		messages:  sender,
+		receipts:  receipts,
+		presence:  presenceStore,
+		handler:   h,
+		now:       now,
+	}
 }
 
 func (c *wsClient) loop(ctx context.Context, onSeen func()) {
@@ -422,6 +474,7 @@ func (c *wsClient) handleSendMessage(ctx context.Context, pkt Packet) {
 		Stage:          resp.Stage,
 		CreatedAtMs:    resp.Message.CreatedAtMs,
 	})
+	c.syncOwnOtherDevices(resp.Message)
 }
 
 func (c *wsClient) handleSyncMessages(ctx context.Context, pkt Packet) {
@@ -610,6 +663,11 @@ func (c *wsClient) handlePresenceSubscribe(pkt Packet) {
 			event.OnlineDeviceIDs = append(event.OnlineDeviceIDs, device.DeviceID)
 		}
 		events = append(events, event)
+		// Register this client as a subscriber for proactive presence push.
+		if c.handler != nil {
+			c.handler.addPresenceSubscriber(userID, c)
+			c.subscribedTo = append(c.subscribedTo, userID)
+		}
 	}
 	c.writeJSON("presence_subscribe_response", pkt.TraceID, presenceSubscribeResponsePayload{Events: events})
 }
@@ -687,4 +745,75 @@ func (c *wsClient) writeJSON(command, traceID string, payload any) {
 
 func (c *wsClient) writeError(traceID, code, messageText string, retryable bool) {
 	c.writeJSON("error", traceID, errorPayload{Code: code, Message: messageText, Retryable: retryable})
+}
+
+func (c *wsClient) syncOwnOtherDevices(msg message.Message) {
+	if c.syncPusher != nil {
+		c.syncPusher(msg)
+	}
+}
+
+// unsubscribeAll removes this client from all presence subscription sets it joined.
+// Called on disconnect.
+func (c *wsClient) unsubscribeAll() {
+	if c.handler == nil {
+		return
+	}
+	for _, userID := range c.subscribedTo {
+		c.handler.removePresenceSubscriber(userID, c.id)
+	}
+}
+
+// addPresenceSubscriber registers client as a subscriber for the given watched userID.
+func (h *WebSocketHandler) addPresenceSubscriber(watchedUserID uint64, client *wsClient) {
+	key := presenceSubsKey(watchedUserID)
+	actual, _ := h.presenceSubs.LoadOrStore(key, &sync.Map{})
+	subs := actual.(*sync.Map)
+	subs.Store(client.id, client)
+}
+
+// removePresenceSubscriber removes a subscriber by clientID for the given watched userID.
+func (h *WebSocketHandler) removePresenceSubscriber(watchedUserID uint64, clientID string) {
+	key := presenceSubsKey(watchedUserID)
+	if val, ok := h.presenceSubs.Load(key); ok {
+		subs := val.(*sync.Map)
+		subs.Delete(clientID)
+	}
+}
+
+// notifyPresenceChange pushes a presence_changed packet to all clients subscribed
+// to the given userID. It reads the current snapshot from the presence store.
+func (h *WebSocketHandler) notifyPresenceChange(userID uint64) {
+	key := presenceSubsKey(userID)
+	val, ok := h.presenceSubs.Load(key)
+	if !ok {
+		return
+	}
+	subs := val.(*sync.Map)
+
+	// Build the event payload from the current presence snapshot.
+	var event presenceEventPayload
+	if h.presence != nil {
+		snapshot := h.presence.Snapshot(userID)
+		event = presenceEventPayload{UserID: snapshot.UserID, Status: snapshot.Status}
+		for _, d := range snapshot.Devices {
+			event.OnlineDeviceIDs = append(event.OnlineDeviceIDs, d.DeviceID)
+		}
+	} else {
+		event = presenceEventPayload{UserID: userID, Status: 0}
+	}
+
+	seen := make(map[string]struct{})
+	subs.Range(func(_, value any) bool {
+		client, ok := value.(*wsClient)
+		if !ok || client == nil {
+			return true
+		}
+		if _, dup := seen[client.id]; dup {
+			return true
+		}
+		seen[client.id] = struct{}{}
+		client.writeJSON("presence_changed", "", event)
+		return true
+	})
 }

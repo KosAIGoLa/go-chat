@@ -11,9 +11,14 @@ import (
 func TestDeliverDetectsOfflineAndOnline(t *testing.T) {
 	routes := route.NewRegistry()
 	svc := NewService(routes)
-	offline := svc.Deliver(context.Background(), Task{TargetUserID: 1, Message: message.Message{ID: 1}})
+	offlinePusher := &fakePusher{online: map[string]bool{}}
+	svc = NewService(routes).WithPusher(offlinePusher)
+	offline := svc.Deliver(context.Background(), Task{TargetUserID: 1, Message: message.Message{ID: 1, ConversationID: 10, Seq: 7, SenderID: 9, CreatedAtMs: 123}})
 	if !offline.Offline {
 		t.Fatalf("expected offline result")
+	}
+	if len(offlinePusher.offlineCalls) != 1 || offlinePusher.offlineCalls[0] != 1 {
+		t.Fatalf("expected offline push call for user 1, got %+v", offlinePusher.offlineCalls)
 	}
 	routes.Register(route.DeviceRoute{UserID: 1, DeviceID: "web", GatewayID: "gw", ConnID: "c"})
 	online := svc.Deliver(context.Background(), Task{TargetUserID: 1, Message: message.Message{ID: 1}})
@@ -61,14 +66,19 @@ func TestDeliverWithoutPusherRecordsUndeliveredRoutes(t *testing.T) {
 }
 
 type fakePusher struct {
-	online map[string]bool
-	calls  []string
+	online       map[string]bool
+	calls        []string
+	offlineCalls []uint64
 }
 
 func (p *fakePusher) PushToDevice(userID uint64, deviceID string, _ message.Message) bool {
 	key := routeKey(userID, deviceID)
 	p.calls = append(p.calls, key)
 	return p.online[key]
+}
+
+func (p *fakePusher) PushOffline(userID uint64, _ message.Message) {
+	p.offlineCalls = append(p.offlineCalls, userID)
 }
 
 func routeKey(userID uint64, deviceID string) string {

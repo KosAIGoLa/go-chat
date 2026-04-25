@@ -27,6 +27,7 @@ type Result struct {
 
 type Pusher interface {
 	PushToDevice(userID uint64, deviceID string, msg message.Message) bool
+	PushOffline(userID uint64, msg message.Message)
 }
 
 type Service struct {
@@ -52,6 +53,9 @@ func (s *Service) Deliver(_ context.Context, task Task) Result {
 			delivered = s.pusher.PushToDevice(task.TargetUserID, onlineRoute.DeviceID, task.Message)
 		}
 		result.RouteResults = append(result.RouteResults, RouteDelivery{Route: onlineRoute, Delivered: delivered})
+	}
+	if result.Offline && s.pusher != nil {
+		s.pusher.PushOffline(task.TargetUserID, task.Message)
 	}
 	s.mu.Lock()
 	s.sent = append(s.sent, result)
