@@ -87,3 +87,16 @@ func (s *MemoryStore) Recall(_ context.Context, msgID uint64, recalledAtMs int64
 	m.RecalledAtMs = recalledAtMs
 	return nil
 }
+
+func (s *MemoryStore) Delete(_ context.Context, msgID uint64, deletedAtMs int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	m, ok := s.byID[msgID]
+	if !ok {
+		return apperrors.AppError{Code: apperrors.MsgNotFound, Message: "message not found"}
+	}
+	m.Status = MessageStatusDeleted
+	m.RecalledAtMs = deletedAtMs
+	return nil
+}

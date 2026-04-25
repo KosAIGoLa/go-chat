@@ -111,3 +111,74 @@ func TestServiceRecallRequiresIDs(t *testing.T) {
 		t.Fatalf("expected SysBadRequest, got %v", err)
 	}
 }
+
+func TestServiceDelete(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "d1", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deleted, err := svc.Delete(context.Background(), DeleteRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  20,
+	})
+	if err != nil {
+		t.Fatalf("unexpected delete error: %v", err)
+	}
+	if deleted.Status != MessageStatusDeleted {
+		t.Fatalf("expected deleted status, got %v", deleted.Status)
+	}
+	if deleted.RecalledAtMs == 0 {
+		t.Fatal("expected non-zero deleted timestamp")
+	}
+
+	// Idempotent: delete again should return existing state
+	deleted2, err := svc.Delete(context.Background(), DeleteRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  20,
+	})
+	if err != nil {
+		t.Fatalf("unexpected idempotent delete error: %v", err)
+	}
+	if deleted2.Status != MessageStatusDeleted {
+		t.Fatalf("expected deleted status on idempotent call, got %v", deleted2.Status)
+	}
+}
+
+func TestServiceDeleteRejectsNonSender(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "d2", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Delete(context.Background(), DeleteRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  21,
+	})
+	if err == nil {
+		t.Fatal("expected error for non-sender delete")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.MsgDeleteNotAllowed {
+		t.Fatalf("expected MsgDeleteNotAllowed, got %v", err)
+	}
+}
+
+func TestServiceDeleteRequiresIDs(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+
+	_, err := svc.Delete(context.Background(), DeleteRequest{})
+	if err == nil {
+		t.Fatal("expected error for empty delete request")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.SysBadRequest {
+		t.Fatalf("expected SysBadRequest, got %v", err)
+	}
+}

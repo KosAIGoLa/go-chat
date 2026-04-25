@@ -36,11 +36,17 @@ type RecallRequest struct {
 	SenderID  uint64
 }
 
+type DeleteRequest struct {
+	MessageID uint64
+	SenderID  uint64
+}
+
 type Store interface {
 	Save(context.Context, Message) error
 	Get(ctx context.Context, msgID uint64) (Message, error)
 	ListAfter(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]Message, error)
 	Recall(ctx context.Context, msgID uint64, recalledAtMs int64) error
+	Delete(ctx context.Context, msgID uint64, deletedAtMs int64) error
 }
 
 type EventPublisher interface {
@@ -130,5 +136,28 @@ func (s *Service) Recall(ctx context.Context, req RecallRequest) (Message, error
 	}
 	msg.Status = MessageStatusRecalled
 	msg.RecalledAtMs = recalledAtMs
+	return msg, nil
+}
+
+func (s *Service) Delete(ctx context.Context, req DeleteRequest) (Message, error) {
+	if req.MessageID == 0 || req.SenderID == 0 {
+		return Message{}, apperrors.AppError{Code: apperrors.SysBadRequest, Message: "msg_id and sender_id are required", Retryable: false}
+	}
+	msg, err := s.store.Get(ctx, req.MessageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if msg.SenderID != req.SenderID {
+		return Message{}, apperrors.AppError{Code: apperrors.MsgDeleteNotAllowed, Message: "message delete not allowed", Retryable: false}
+	}
+	if msg.Status == MessageStatusDeleted {
+		return msg, nil
+	}
+	deletedAtMs := timeutil.UnixMilli()
+	if err := s.store.Delete(ctx, req.MessageID, deletedAtMs); err != nil {
+		return Message{}, err
+	}
+	msg.Status = MessageStatusDeleted
+	msg.RecalledAtMs = deletedAtMs
 	return msg, nil
 }

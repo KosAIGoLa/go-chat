@@ -571,6 +571,52 @@ func TestWebSocketRecallMessageValidationError(t *testing.T) {
 	}
 }
 
+func TestWebSocketDeleteMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := message.NewService(sequence.NewAllocator(), message.NewMemoryStore())
+	sendResp, err := svc.Send(context.Background(), message.SendRequest{
+		ConversationID: 10, SenderID: 42, SenderDeviceID: "ios", ClientMsgID: "delete-ws-1", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Message.ID
+
+	router := gin.New()
+	NewWebSocketHandler().WithAuth(tokens).WithMessageSender(svc).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	payload, err := json.Marshal(recallMessagePayload{MessageID: msgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "delete_message", TraceID: "delete-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "delete_message_ack" || pkt.TraceID != "delete-1" {
+		t.Fatalf("unexpected delete ack packet: %+v", pkt)
+	}
+	var ack recallMessageAckPayload
+	if err := json.Unmarshal(pkt.Payload, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.MessageID != msgID || ack.Status != message.MessageStatusDeleted || ack.RecalledAtMs == 0 {
+		t.Fatalf("unexpected delete ack payload: %+v", ack)
+	}
+}
+
 func TestWebSocketRouteRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -607,5 +653,9 @@ func (errorSender) Sync(context.Context, uint64, uint64, int) ([]message.Message
 }
 
 func (errorSender) Recall(context.Context, message.RecallRequest) (message.Message, error) {
+	return message.Message{}, nil
+}
+
+func (errorSender) Delete(context.Context, message.DeleteRequest) (message.Message, error) {
 	return message.Message{}, nil
 }

@@ -220,3 +220,122 @@ func TestHTTPHandlerRecallNotFound(t *testing.T) {
 		t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp.Error.Code)
 	}
 }
+
+func TestHTTPHandlerDelete(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"delete-c1","type":1}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+	var sendResp struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Data.Message.MsgID
+
+	deleteBody := []byte(`{"sender_id":20}`)
+	deleteReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(deleteBody))
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("delete failed: %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	var deleteResp struct {
+		Data struct {
+			Message messageJSON `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(deleteRec.Body).Decode(&deleteResp); err != nil {
+		t.Fatal(err)
+	}
+	if deleteResp.Data.Message.Status != MessageStatusDeleted {
+		t.Fatalf("expected deleted status, got %v", deleteResp.Data.Message.Status)
+	}
+	if deleteResp.Data.Message.RecalledAtMs == 0 {
+		t.Fatal("expected non-zero deleted timestamp")
+	}
+}
+
+func TestHTTPHandlerDeleteRejectsNonSender(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"delete-c2","type":1}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+	var sendResp2 struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp2); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp2.Data.Message.MsgID
+
+	deleteBody := []byte(`{"sender_id":21}`)
+	deleteReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/api/v1/messages/%d", msgID), bytes.NewReader(deleteBody))
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	var errResp2 struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(deleteRec.Body).Decode(&errResp2); err != nil {
+		t.Fatal(err)
+	}
+	if errResp2.Error.Code != string(apperrors.MsgDeleteNotAllowed) {
+		t.Fatalf("expected MSG_DELETE_NOT_ALLOWED, got %q", errResp2.Error.Code)
+	}
+}
+
+func TestHTTPHandlerDeleteNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	deleteBody := []byte(`{"sender_id":20}`)
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/api/v1/messages/999999", bytes.NewReader(deleteBody))
+	deleteRec := httptest.NewRecorder()
+	router.ServeHTTP(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", deleteRec.Code, deleteRec.Body.String())
+	}
+	var errResp3 struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(deleteRec.Body).Decode(&errResp3); err != nil {
+		t.Fatal(err)
+	}
+	if errResp3.Error.Code != string(apperrors.MsgNotFound) {
+		t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp3.Error.Code)
+	}
+}

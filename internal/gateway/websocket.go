@@ -32,6 +32,7 @@ type MessageService interface {
 	Send(context.Context, message.SendRequest) (message.SendResponse, error)
 	Sync(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]message.Message, error)
 	Recall(ctx context.Context, req message.RecallRequest) (message.Message, error)
+	Delete(ctx context.Context, req message.DeleteRequest) (message.Message, error)
 }
 
 type ReceiptStore interface {
@@ -268,6 +269,8 @@ func (c *wsClient) loop(ctx context.Context, onSeen func()) {
 			c.handlePresenceSubscribe(pkt)
 		case "recall_message":
 			c.handleRecallMessage(ctx, pkt)
+		case "delete_message":
+			c.handleDeleteMessage(ctx, pkt)
 		default:
 			c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), "unsupported command", false)
 		}
@@ -470,6 +473,43 @@ func (c *wsClient) handleRecallMessage(ctx context.Context, pkt Packet) {
 		return
 	}
 	c.writeJSON("recall_message_ack", pkt.TraceID, recallMessageAckPayload{
+		MessageID:    msg.ID,
+		Status:       msg.Status,
+		RecalledAtMs: msg.RecalledAtMs,
+	})
+}
+
+func (c *wsClient) handleDeleteMessage(ctx context.Context, pkt Packet) {
+	if c.messages == nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysUnavailable), "message service is unavailable", true)
+		return
+	}
+	var payload recallMessagePayload
+	if err := json.Unmarshal(pkt.Payload, &payload); err != nil {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), err.Error(), false)
+		return
+	}
+	if payload.MessageID == 0 {
+		c.writeError(pkt.TraceID, string(apperrors.SysBadRequest), "msg_id is required", false)
+		return
+	}
+	msg, err := c.messages.Delete(ctx, message.DeleteRequest{
+		MessageID: payload.MessageID,
+		SenderID:  c.principal.UserID,
+	})
+	if err != nil {
+		code := string(apperrors.SysInternal)
+		messageText := "internal error"
+		retryable := true
+		if appErr, ok := err.(apperrors.AppError); ok {
+			code = string(appErr.Code)
+			messageText = appErr.Message
+			retryable = appErr.Retryable
+		}
+		c.writeError(pkt.TraceID, code, messageText, retryable)
+		return
+	}
+	c.writeJSON("delete_message_ack", pkt.TraceID, recallMessageAckPayload{
 		MessageID:    msg.ID,
 		Status:       msg.Status,
 		RecalledAtMs: msg.RecalledAtMs,

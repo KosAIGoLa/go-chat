@@ -90,6 +90,23 @@ func (s *GORMStore) Recall(ctx context.Context, msgID uint64, recalledAtMs int64
 	return nil
 }
 
+func (s *GORMStore) Delete(ctx context.Context, msgID uint64, deletedAtMs int64) error {
+	result := s.db.WithContext(ctx).
+		Model(&GORMMessage{}).
+		Where("id = ?", msgID).
+		Updates(map[string]interface{}{
+			"status":         uint8(MessageStatusDeleted),
+			"recalled_at_ms": deletedAtMs,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return apperrors.AppError{Code: apperrors.MsgNotFound}
+	}
+	return nil
+}
+
 func (s *GORMStore) ListAfter(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]Message, error) {
 	var rows []GORMMessage
 	if err := s.db.WithContext(ctx).

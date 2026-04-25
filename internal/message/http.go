@@ -35,6 +35,7 @@ func (h *HTTPHandler) Register(router gin.IRouter) {
 	router.POST("/api/v1/messages", h.send)
 	router.GET("/api/v1/conversations/:conversation_id/messages", h.sync)
 	router.POST("/api/v1/messages/:msg_id/recall", h.recall)
+	router.DELETE("/api/v1/messages/:msg_id", h.delete)
 }
 
 type sendMessageJSON struct {
@@ -164,6 +165,38 @@ func (h *HTTPHandler) recall(c *gin.Context) {
 	httpapi.GinJSON(c, http.StatusOK, gin.H{"message": toJSON(msg)})
 }
 
+func (h *HTTPHandler) delete(c *gin.Context) {
+	msgID, err := strconv.ParseUint(c.Param("msg_id"), 10, 64)
+	if err != nil {
+		httpapi.GinError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	var senderID uint64
+	principal, ok := auth.PrincipalFromContext(c.Request.Context())
+	if ok {
+		senderID = principal.UserID
+	} else {
+		// Allow optional JSON body { "sender_id": N } for unauthenticated test scenarios
+		var body struct {
+			SenderID uint64 `json:"sender_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err == nil {
+			senderID = body.SenderID
+		}
+	}
+
+	msg, err := h.service.Delete(c.Request.Context(), DeleteRequest{
+		MessageID: msgID,
+		SenderID:  senderID,
+	})
+	if err != nil {
+		httpapi.GinError(c, httpStatusFor(err), err)
+		return
+	}
+	httpapi.GinJSON(c, http.StatusOK, gin.H{"message": toJSON(msg)})
+}
+
 func toJSON(msg Message) messageJSON {
 	return messageJSON{
 		ID:             msg.ID,
@@ -199,7 +232,7 @@ func httpStatusFor(err error) int {
 			return http.StatusServiceUnavailable
 		case apperrors.MsgNotFound:
 			return http.StatusNotFound
-		case apperrors.MsgRecallNotAllowed:
+		case apperrors.MsgRecallNotAllowed, apperrors.MsgDeleteNotAllowed:
 			return http.StatusForbidden
 		}
 	}
