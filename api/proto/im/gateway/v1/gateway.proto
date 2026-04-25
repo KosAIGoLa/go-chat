@@ -1,0 +1,6 @@
+syntax = "proto3";
+package im.gateway.v1;
+import "im/message/v1/message.proto";
+message DeliverRequest { string gateway_id = 1; string conn_id = 2; im.message.v1.PushMessage message = 3; }
+message DeliverResponse { bool accepted = 1; string error_code = 2; }
+service GatewayService { rpc Deliver(DeliverRequest) returns (DeliverResponse); }

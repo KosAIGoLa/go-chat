@@ -1,0 +1,167 @@
+{
+  "taskId": "019dc4b8-ea6e-730c-9cc0-63989b520013",
+  "todos": [
+    {
+      "id": "43ed7b282ea5f4448a4c1b5cad34eef6",
+      "content": "Clarify IM product scope, scale targets, and core functional requirements",
+      "status": "completed"
+    },
+    {
+      "id": "68b4a9481dffd62d4fc68cfee28dd397",
+      "content": "Identify non-functional requirements for MVP-to-ten-million evolution, latency, availability, consistency, compliance, and observability",
+      "status": "completed"
+    },
+    {
+      "id": "452426f8705a3d850f7fe1bfa1fd42ab",
+      "content": "Design high-level Go IM architecture covering gateway, routing, messaging, storage, push, and admin services",
+      "status": "completed"
+    },
+    {
+      "id": "1e03044b835d320536471a93fd3bd681",
+      "content": "Expand detailed database table schema, Redis Key design, Kafka Topic design, and Protobuf protocol design",
+      "status": "completed"
+    },
+    {
+      "id": "5d6fe5c47ae6bc68effc7f949d030078",
+      "content": "Add enterprise capability planning for organization structure, audit compliance, permissions, private deployment, and SSO",
+      "status": "completed"
+    },
+    {
+      "id": "59f764eea03333ee404b6e7314579f65",
+      "content": "Add API catalog, service interface boundaries, and error code specification",
+      "status": "completed"
+    },
+    {
+      "id": "5448abf87b36c5dd5b4a7d60777658ab",
+      "content": "Plan distributed connection management, message routing, fanout, ordering, ACK, retry, and idempotency strategies",
+      "status": "completed"
+    },
+    {
+      "id": "b2c7ab7b704886bbb51a16ea9bff4b74",
+      "content": "Plan deployment topology, scaling strategy, disaster recovery, monitoring, and capacity considerations",
+      "status": "completed"
+    },
+    {
+      "id": "cc5d22f82ed13b1a964dfeca2980536b",
+      "content": "Persist the architecture plan under `.tocodex/plans/` as a markdown file",
+      "status": "completed"
+    },
+    {
+      "id": "616a34c88b2db8de8450798da8d3256c",
+      "content": "Ask user to review the expanded plan and confirm whether changes are needed",
+      "status": "completed"
+    },
+    {
+      "id": "b66fc84885d08bcc50e1ef786acae8f8",
+      "content": "Switch to implementation mode when the architecture plan is approved",
+      "status": "completed"
+    },
+    {
+      "id": "dc3ef934b05b928e549965036169c50c",
+      "content": "Inspect workspace and define Go IM skeleton scope",
+      "status": "completed"
+    },
+    {
+      "id": "4b930a2f504a6ec2dfff0abf55e11578",
+      "content": "Create Go module, service entrypoints, internal packages, protobuf stubs, configs, migrations, deployment placeholders, and docs",
+      "status": "completed"
+    },
+    {
+      "id": "b113ea69d17a4b71e34e889e020426cb",
+      "content": "Run formatting and basic validation",
+      "status": "completed"
+    },
+    {
+      "id": "5facf046bd32fc26bdb7b60dd4c6a755",
+      "content": "Implement next MVP foundation: config-aware service bootstrap, health endpoints, in-memory message flow components, and unit tests",
+      "status": "completed"
+    },
+    {
+      "id": "48ba652c838c507bacf8b46d126c5d17",
+      "content": "Run formatting and validation for MVP foundation",
+      "status": "completed"
+    },
+    {
+      "id": "a224658b63e6ec8046ff96640524e23a",
+      "content": "Implement MVP HTTP Message API and gateway route wiring for send/sync flows",
+      "status": "completed"
+    },
+    {
+      "id": "b7c2bc649c2911e0a2f7eb069bc9aa4b",
+      "content": "Add JSON API models, response wrapper, HTTP tests, and run validation",
+      "status": "completed"
+    },
+    {
+      "id": "054a2d84c1dcafea404c25f42871d840",
+      "content": "Implement MVP fanout, inbox, and delivery domain components with tests",
+      "status": "completed"
+    },
+    {
+      "id": "406260ae24034d3417fe8311f9c86f61",
+      "content": "Run formatting and validation for fanout/inbox/delivery components",
+      "status": "completed"
+    },
+    {
+      "id": "3f5080f256933d5dd1bceec44d2854ab",
+      "content": "Implement in-memory MQ abstraction, message published events, and fanout consumer wiring",
+      "status": "completed"
+    },
+    {
+      "id": "bd6d9d365848ad65d1f676531b098232",
+      "content": "Run formatting and validation for MQ/fanout integration",
+      "status": "completed"
+    },
+    {
+      "id": "32be4f3647fc7c4f4fcee4f753fab2c5",
+      "content": "Implement MVP presence, receipt, and rate limit components with tests",
+      "status": "completed"
+    },
+    {
+      "id": "ddb5bf35767413605af0e40991d1a6b4",
+      "content": "Run formatting and validation for presence/receipt/rate limit components",
+      "status": "completed"
+    },
+    {
+      "id": "e517ff9f9823ab71a24d1762e54eeb6b",
+      "content": "Implement MVP auth token service, HTTP auth middleware, and principal propagation tests",
+      "status": "completed"
+    },
+    {
+      "id": "1040317faec983a1a27eef7789b9073f",
+      "content": "Run formatting and validation for auth middleware",
+      "status": "completed"
+    },
+    {
+      "id": "9ee02c465fd4f44699244971c3d3e2dd",
+      "content": "Add auth config, login API, and protect message send/sync endpoints",
+      "status": "completed"
+    },
+    {
+      "id": "eb7d048efe66b7af2ed1df9687bc6357",
+      "content": "Run formatting and validation for authenticated Message API",
+      "status": "completed"
+    },
+    {
+      "id": "c2e8a9af98c656eed46f4fbfd4b249ba",
+      "content": "Implement enterprise in-memory directory and permission service with tests",
+      "status": "completed"
+    },
+    {
+      "id": "4d483713daf23a913816b14c5a2d303f",
+      "content": "Run formatting and validation for enterprise permission components",
+      "status": "completed"
+    },
+    {
+      "id": "58072bc951f5d8e17e40781b2b28103c",
+      "content": "Implement audit event store, MQ audit consumer, and tests",
+      "status": "completed"
+    },
+    {
+      "id": "7db515501e0d05a603fd8bf5d40026fb",
+      "content": "Run formatting and validation for audit components",
+      "status": "completed"
+    }
+  ],
+  "lastUpdated": 1777125552350,
+  "status": "active"
+}

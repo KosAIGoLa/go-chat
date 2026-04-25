@@ -1,0 +1,4 @@
+syntax = "proto3";
+package im.group.v1;
+message Group { uint64 group_id = 1; uint64 conversation_id = 2; string name = 3; uint32 member_count = 4; }
+message Member { uint64 group_id = 1; uint64 user_id = 2; uint32 role = 3; }

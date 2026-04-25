@@ -1,0 +1,16 @@
+syntax = "proto3";
+package im.message.v1;
+import "im/common/v1/common.proto";
+
+enum ConversationType { CONVERSATION_TYPE_UNSPECIFIED = 0; CONVERSATION_TYPE_SINGLE = 1; CONVERSATION_TYPE_GROUP = 2; }
+enum MessageType { MESSAGE_TYPE_UNSPECIFIED = 0; MESSAGE_TYPE_TEXT = 1; MESSAGE_TYPE_IMAGE = 2; MESSAGE_TYPE_AUDIO = 3; MESSAGE_TYPE_VIDEO = 4; MESSAGE_TYPE_FILE = 5; MESSAGE_TYPE_CUSTOM = 100; }
+enum AckStage { ACK_STAGE_UNSPECIFIED = 0; ACK_STAGE_RECEIVED = 1; ACK_STAGE_QUEUED = 2; ACK_STAGE_PERSISTED = 3; ACK_STAGE_DELIVERED = 4; ACK_STAGE_READ = 5; }
+
+message MessageBody { MessageType type = 1; bytes content = 2; map<string, string> ext = 3; }
+message SendMessageRequest { uint64 conversation_id = 1; ConversationType conversation_type = 2; uint64 sender_id = 3; string sender_device_id = 4; string client_msg_id = 5; MessageBody body = 6; }
+message SendMessageResponse { uint64 msg_id = 1; uint64 conversation_id = 2; uint64 seq = 3; string client_msg_id = 4; AckStage ack_stage = 5; im.common.v1.Error error = 100; }
+message PushMessage { uint64 msg_id = 1; uint64 conversation_id = 2; ConversationType conversation_type = 3; uint64 seq = 4; uint64 sender_id = 5; string sender_device_id = 6; MessageBody body = 7; int64 server_time_ms = 8; }
+message SyncMessagesRequest { uint64 conversation_id = 1; uint64 from_seq = 2; uint64 limit = 3; }
+message SyncMessagesResponse { repeated PushMessage messages = 1; uint64 next_seq = 2; bool has_more = 3; }
+
+service MessageService { rpc SendMessage(SendMessageRequest) returns (SendMessageResponse); rpc SyncMessages(SyncMessagesRequest) returns (SyncMessagesResponse); }

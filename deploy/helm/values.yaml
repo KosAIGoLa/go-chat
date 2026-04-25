@@ -1,0 +1,6 @@
+image:
+  repository: ck-chat
+  tag: dev
+replicaCount:
+  gateway: 3
+  messageApi: 2

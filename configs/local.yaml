@@ -1,0 +1,17 @@
+service:
+  name: ck-chat
+  env: local
+http:
+  addr: ":8080"
+grpc:
+  addr: ":9090"
+redis:
+  addrs: ["127.0.0.1:6379"]
+kafka:
+  brokers: ["127.0.0.1:9092"]
+mysql:
+  dsn: "root:root@tcp(127.0.0.1:3306)/ck_chat?parseTime=true"
+
+auth:
+  token_secret: "local-dev-secret-change-me"
+  token_ttl: "24h"

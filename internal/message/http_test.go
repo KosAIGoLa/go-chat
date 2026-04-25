@@ -1,0 +1,90 @@
+package message
+
+import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/gin-gonic/gin"
+
+	apperrors "github.com/ck-chat/ck-chat/internal/errors"
+	"github.com/ck-chat/ck-chat/internal/ratelimit"
+	"github.com/ck-chat/ck-chat/internal/sequence"
+)
+
+func TestHTTPHandlerSendAndSync(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	body := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c1","type":1,"payload":"aGVsbG8="}`)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	syncReq := httptest.NewRequest(http.MethodGet, "/api/v1/conversations/10/messages?from_seq=1&limit=10", nil)
+	syncRec := httptest.NewRecorder()
+	router.ServeHTTP(syncRec, syncReq)
+	if syncRec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", syncRec.Code, syncRec.Body.String())
+	}
+	var decoded struct {
+		Data struct {
+			Messages []messageJSON `json:"messages"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(syncRec.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if len(decoded.Data.Messages) != 1 || decoded.Data.Messages[0].Seq != 1 {
+		t.Fatalf("unexpected response: %+v", decoded)
+	}
+}
+
+func TestHTTPHandlerRateLimitsMessageSend(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	handler := NewHTTPHandler(svc).WithRateLimiter(ratelimit.New(1, time.Second))
+	handler.now = func() time.Time { return time.Unix(100, 0) }
+	router := gin.New()
+	handler.Register(router)
+
+	body := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c1","type":1}`)
+	first := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(body))
+	first.RemoteAddr = "192.0.2.1:1234"
+	firstRec := httptest.NewRecorder()
+	router.ServeHTTP(firstRec, first)
+	if firstRec.Code != http.StatusAccepted {
+		t.Fatalf("unexpected first status: %d body=%s", firstRec.Code, firstRec.Body.String())
+	}
+
+	secondBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"c2","type":1}`)
+	second := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(secondBody))
+	second.RemoteAddr = "192.0.2.1:1234"
+	secondRec := httptest.NewRecorder()
+	router.ServeHTTP(secondRec, second)
+	if secondRec.Code != http.StatusTooManyRequests {
+		t.Fatalf("unexpected second status: %d body=%s", secondRec.Code, secondRec.Body.String())
+	}
+	if secondRec.Header().Get("Retry-After") != "1" {
+		t.Fatalf("expected Retry-After header, got %q", secondRec.Header().Get("Retry-After"))
+	}
+	var decoded struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(secondRec.Body).Decode(&decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Error.Code != string(apperrors.MsgRateLimited) {
+		t.Fatalf("unexpected error code: %+v", decoded)
+	}
+}

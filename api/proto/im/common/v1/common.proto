@@ -1,0 +1,36 @@
+syntax = "proto3";
+package im.common.v1;
+
+message Packet {
+  uint32 version = 1;
+  Command command = 2;
+  string request_id = 3;
+  string trace_id = 4;
+  uint64 tenant_id = 5;
+  uint64 user_id = 6;
+  string device_id = 7;
+  int64 timestamp_ms = 8;
+  bytes payload = 9;
+}
+
+enum Command {
+  COMMAND_UNSPECIFIED = 0;
+  COMMAND_AUTH = 1;
+  COMMAND_HEARTBEAT = 2;
+  COMMAND_SEND_MESSAGE = 100;
+  COMMAND_SEND_MESSAGE_ACK = 101;
+  COMMAND_PUSH_MESSAGE = 102;
+  COMMAND_DELIVERY_ACK = 103;
+  COMMAND_READ_ACK = 104;
+  COMMAND_SYNC_CONVERSATION = 200;
+  COMMAND_SYNC_MESSAGE = 201;
+  COMMAND_PRESENCE_SUBSCRIBE = 300;
+  COMMAND_PRESENCE_EVENT = 301;
+}
+
+message Error {
+  string code = 1;
+  string message = 2;
+  bool retryable = 3;
+  map<string, string> details = 4;
+}

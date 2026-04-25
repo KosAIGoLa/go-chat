@@ -1,0 +1,5 @@
+syntax = "proto3";
+package im.conversation.v1;
+message Conversation { uint64 conversation_id = 1; uint32 type = 2; uint64 last_seq = 3; uint64 last_msg_id = 4; uint32 unread_count = 5; }
+message ListConversationsRequest { uint64 user_id = 1; string cursor = 2; uint32 limit = 3; }
+message ListConversationsResponse { repeated Conversation conversations = 1; string next_cursor = 2; bool has_more = 3; }
