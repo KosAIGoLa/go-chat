@@ -15,6 +15,8 @@ import (
 	"github.com/ck-chat/ck-chat/internal/auth"
 	apperrors "github.com/ck-chat/ck-chat/internal/errors"
 	"github.com/ck-chat/ck-chat/internal/message"
+	"github.com/ck-chat/ck-chat/internal/presence"
+	"github.com/ck-chat/ck-chat/internal/receipt"
 	"github.com/ck-chat/ck-chat/internal/route"
 	"github.com/ck-chat/ck-chat/internal/sequence"
 )
@@ -248,6 +250,244 @@ func TestWebSocketSyncMessagesValidationError(t *testing.T) {
 	}
 	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
 		t.Fatalf("unexpected error response: %+v", resp)
+	}
+}
+
+func TestWebSocketPushToDevice(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWebSocketHandler().WithAuth(tokens)
+	router := gin.New()
+	handler.Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	ok := handler.PushToDevice(42, "ios", message.Message{ID: 99, ConversationID: 10, Seq: 7, SenderID: 1, SenderDeviceID: "pc", ClientMsgID: "c99", Type: 1, Payload: []byte("pushed"), CreatedAtMs: 123})
+	if !ok {
+		t.Fatal("expected push to connected device")
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "push_message" {
+		t.Fatalf("unexpected push packet: %+v", pkt)
+	}
+	var pushed messagePayload
+	if err := json.Unmarshal(pkt.Payload, &pushed); err != nil {
+		t.Fatal(err)
+	}
+	if pushed.MsgID != 99 || pushed.Seq != 7 || pushed.Payload != base64.StdEncoding.EncodeToString([]byte("pushed")) {
+		t.Fatalf("unexpected pushed message: %+v", pushed)
+	}
+	if handler.PushToDevice(42, "android", message.Message{ID: 100}) {
+		t.Fatal("unexpected push to offline device")
+	}
+}
+
+func TestWebSocketPushToUser(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	iosToken, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pcToken, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "pc"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWebSocketHandler().WithAuth(tokens)
+	router := gin.New()
+	handler.Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	iosConn := dialWebSocket(t, server.URL, "/ws?access_token="+iosToken)
+	defer iosConn.Close()
+	pcConn := dialWebSocket(t, server.URL, "/ws?access_token="+pcToken)
+	defer pcConn.Close()
+
+	if delivered := handler.PushToUser(42, message.Message{ID: 101, ConversationID: 10, Seq: 8, Payload: []byte("fanout")}); delivered != 2 {
+		t.Fatalf("expected 2 pushed devices, got %d", delivered)
+	}
+	for _, conn := range []*websocket.Conn{iosConn, pcConn} {
+		var pkt Packet
+		if err := conn.ReadJSON(&pkt); err != nil {
+			t.Fatal(err)
+		}
+		if pkt.Command != "push_message" {
+			t.Fatalf("unexpected push packet: %+v", pkt)
+		}
+	}
+}
+
+func TestWebSocketDeliveryAndReadAck(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := receipt.NewStore()
+	handler := NewWebSocketHandler().WithAuth(tokens).WithReceiptStore(store)
+	handler.now = func() time.Time { return time.UnixMilli(1234) }
+	router := gin.New()
+	handler.Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	deliveryPayload, err := json.Marshal(receiptAckPayload{ConversationID: 10, Seq: 7})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "delivery_ack", TraceID: "delivered-1", Payload: deliveryPayload}); err != nil {
+		t.Fatal(err)
+	}
+	var deliveryResp Packet
+	if err := conn.ReadJSON(&deliveryResp); err != nil {
+		t.Fatal(err)
+	}
+	if deliveryResp.Command != "delivery_ack_response" || deliveryResp.TraceID != "delivered-1" {
+		t.Fatalf("unexpected delivery ack response: %+v", deliveryResp)
+	}
+	var delivered receiptAckResponsePayload
+	if err := json.Unmarshal(deliveryResp.Payload, &delivered); err != nil {
+		t.Fatal(err)
+	}
+	if delivered.ConversationID != 10 || delivered.DeliveredSeq != 7 || delivered.ReadSeq != 0 || delivered.UpdatedAtMs != 1234 {
+		t.Fatalf("unexpected delivered receipt: %+v", delivered)
+	}
+
+	readPayload, err := json.Marshal(receiptAckPayload{ConversationID: 10, Seq: 9})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "read_ack", TraceID: "read-1", Payload: readPayload}); err != nil {
+		t.Fatal(err)
+	}
+	var readResp Packet
+	if err := conn.ReadJSON(&readResp); err != nil {
+		t.Fatal(err)
+	}
+	if readResp.Command != "read_ack_response" || readResp.TraceID != "read-1" {
+		t.Fatalf("unexpected read ack response: %+v", readResp)
+	}
+	var read receiptAckResponsePayload
+	if err := json.Unmarshal(readResp.Payload, &read); err != nil {
+		t.Fatal(err)
+	}
+	if read.DeliveredSeq != 9 || read.ReadSeq != 9 {
+		t.Fatalf("unexpected read receipt: %+v", read)
+	}
+	stored, ok := store.Get(10, 42, "ios")
+	if !ok || stored.DeliveredSeq != 9 || stored.ReadSeq != 9 {
+		t.Fatalf("unexpected stored receipt: %+v ok=%v", stored, ok)
+	}
+}
+
+func TestWebSocketReceiptAckValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewWebSocketHandler().WithReceiptStore(receipt.NewStore()).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws")
+	defer conn.Close()
+
+	payload, err := json.Marshal(receiptAckPayload{Seq: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "delivery_ack", TraceID: "bad-receipt", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "error" || pkt.TraceID != "bad-receipt" {
+		t.Fatalf("unexpected error packet: %+v", pkt)
+	}
+	var resp errorPayload
+	if err := json.Unmarshal(pkt.Payload, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
+		t.Fatalf("unexpected receipt error response: %+v", resp)
+	}
+}
+
+func TestWebSocketPresenceSubscribe(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	presenceStore := presence.NewStore()
+	presenceStore.Online(7, presence.Device{DeviceID: "ios", GatewayID: "gw"})
+	presenceStore.Online(7, presence.Device{DeviceID: "pc", GatewayID: "gw"})
+	router := gin.New()
+	NewWebSocketHandler().WithPresenceStore(presenceStore).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws")
+	defer conn.Close()
+
+	payload, err := json.Marshal(presenceSubscribePayload{UserIDs: []uint64{7, 8}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "presence_subscribe", TraceID: "presence-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "presence_subscribe_response" || pkt.TraceID != "presence-1" {
+		t.Fatalf("unexpected presence response packet: %+v", pkt)
+	}
+	var resp presenceSubscribeResponsePayload
+	if err := json.Unmarshal(pkt.Payload, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if len(resp.Events) != 2 || resp.Events[0].UserID != 7 || resp.Events[0].Status != presence.StatusOnline || len(resp.Events[0].OnlineDeviceIDs) != 2 || resp.Events[1].Status != presence.StatusOffline {
+		t.Fatalf("unexpected presence response: %+v", resp)
+	}
+}
+
+func TestWebSocketPresenceSubscribeValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewWebSocketHandler().WithPresenceStore(presence.NewStore()).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws")
+	defer conn.Close()
+
+	payload, err := json.Marshal(presenceSubscribePayload{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "presence_subscribe", TraceID: "presence-bad-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "error" || pkt.TraceID != "presence-bad-1" {
+		t.Fatalf("unexpected presence error packet: %+v", pkt)
+	}
+	var resp errorPayload
+	if err := json.Unmarshal(pkt.Payload, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
+		t.Fatalf("unexpected presence error response: %+v", resp)
 	}
 }
 
