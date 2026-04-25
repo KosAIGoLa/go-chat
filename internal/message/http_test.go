@@ -3,6 +3,7 @@ package message
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -86,5 +87,136 @@ func TestHTTPHandlerRateLimitsMessageSend(t *testing.T) {
 	}
 	if decoded.Error.Code != string(apperrors.MsgRateLimited) {
 		t.Fatalf("unexpected error code: %+v", decoded)
+	}
+}
+
+func TestHTTPHandlerRecall(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	// Send a message
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"recall-c1","type":1}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+
+	var sendResp struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Data.Message.MsgID
+	if msgID == 0 {
+		t.Fatal("expected non-zero msg_id in send response")
+	}
+
+	// Recall the message
+	recallBody := []byte(`{"sender_id":20}`)
+	recallReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/messages/%d/recall", msgID), bytes.NewReader(recallBody))
+	recallRec := httptest.NewRecorder()
+	router.ServeHTTP(recallRec, recallReq)
+	if recallRec.Code != http.StatusOK {
+		t.Fatalf("recall failed: %d body=%s", recallRec.Code, recallRec.Body.String())
+	}
+
+	var recallResp struct {
+		Data struct {
+			Message messageJSON `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(recallRec.Body).Decode(&recallResp); err != nil {
+		t.Fatal(err)
+	}
+	if recallResp.Data.Message.Status != MessageStatusRecalled {
+		t.Fatalf("expected recalled status, got %v", recallResp.Data.Message.Status)
+	}
+	if recallResp.Data.Message.RecalledAtMs == 0 {
+		t.Fatal("expected non-zero recalled_at_ms")
+	}
+}
+
+func TestHTTPHandlerRecallRejectsNonSender(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	// Send as sender 20
+	sendBody := []byte(`{"conversation_id":10,"sender_id":20,"sender_device_id":"ios","client_msg_id":"recall-c2","type":1}`)
+	sendReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages", bytes.NewReader(sendBody))
+	sendRec := httptest.NewRecorder()
+	router.ServeHTTP(sendRec, sendReq)
+	if sendRec.Code != http.StatusAccepted {
+		t.Fatalf("send failed: %d body=%s", sendRec.Code, sendRec.Body.String())
+	}
+
+	var sendResp struct {
+		Data struct {
+			Message struct {
+				MsgID uint64 `json:"msg_id"`
+			} `json:"message"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(sendRec.Body).Decode(&sendResp); err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Data.Message.MsgID
+
+	// Try to recall as sender 21
+	recallBody := []byte(`{"sender_id":21}`)
+	recallReq := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/api/v1/messages/%d/recall", msgID), bytes.NewReader(recallBody))
+	recallRec := httptest.NewRecorder()
+	router.ServeHTTP(recallRec, recallReq)
+	if recallRec.Code != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d body=%s", recallRec.Code, recallRec.Body.String())
+	}
+
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(recallRec.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	if errResp.Error.Code != string(apperrors.MsgRecallNotAllowed) {
+		t.Fatalf("expected MSG_RECALL_NOT_ALLOWED, got %q", errResp.Error.Code)
+	}
+}
+
+func TestHTTPHandlerRecallNotFound(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	router := gin.New()
+	NewHTTPHandler(svc).Register(router)
+
+	recallBody := []byte(`{"sender_id":20}`)
+	recallReq := httptest.NewRequest(http.MethodPost, "/api/v1/messages/999999/recall", bytes.NewReader(recallBody))
+	recallRec := httptest.NewRecorder()
+	router.ServeHTTP(recallRec, recallReq)
+	if recallRec.Code != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d body=%s", recallRec.Code, recallRec.Body.String())
+	}
+
+	var errResp struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.NewDecoder(recallRec.Body).Decode(&errResp); err != nil {
+		t.Fatal(err)
+	}
+	if errResp.Error.Code != string(apperrors.MsgNotFound) {
+		t.Fatalf("expected MSG_NOT_FOUND, got %q", errResp.Error.Code)
 	}
 }

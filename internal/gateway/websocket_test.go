@@ -491,6 +491,86 @@ func TestWebSocketPresenceSubscribeValidationError(t *testing.T) {
 	}
 }
 
+func TestWebSocketRecallMessage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tokens := auth.NewTokenService("secret")
+	token, err := tokens.Issue(auth.Principal{TenantID: 1, UserID: 42, DeviceID: "ios"}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := message.NewService(sequence.NewAllocator(), message.NewMemoryStore())
+	// Pre-send a message as user 42
+	sendResp, err := svc.Send(context.Background(), message.SendRequest{
+		ConversationID: 10, SenderID: 42, SenderDeviceID: "ios", ClientMsgID: "recall-ws-1", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	msgID := sendResp.Message.ID
+
+	router := gin.New()
+	NewWebSocketHandler().WithAuth(tokens).WithMessageSender(svc).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws?access_token="+token)
+	defer conn.Close()
+
+	payload, err := json.Marshal(recallMessagePayload{MessageID: msgID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "recall_message", TraceID: "recall-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "recall_message_ack" || pkt.TraceID != "recall-1" {
+		t.Fatalf("unexpected recall ack packet: %+v", pkt)
+	}
+	var ack recallMessageAckPayload
+	if err := json.Unmarshal(pkt.Payload, &ack); err != nil {
+		t.Fatal(err)
+	}
+	if ack.MessageID != msgID || ack.Status != message.MessageStatusRecalled || ack.RecalledAtMs == 0 {
+		t.Fatalf("unexpected recall ack payload: %+v", ack)
+	}
+}
+
+func TestWebSocketRecallMessageValidationError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	NewWebSocketHandler().WithMessageSender(errorSender{}).Register(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn := dialWebSocket(t, server.URL, "/ws")
+	defer conn.Close()
+
+	// Send recall with zero msg_id
+	payload, err := json.Marshal(recallMessagePayload{MessageID: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.WriteJSON(Packet{Command: "recall_message", TraceID: "recall-bad-1", Payload: payload}); err != nil {
+		t.Fatal(err)
+	}
+	var pkt Packet
+	if err := conn.ReadJSON(&pkt); err != nil {
+		t.Fatal(err)
+	}
+	if pkt.Command != "error" || pkt.TraceID != "recall-bad-1" {
+		t.Fatalf("unexpected error packet: %+v", pkt)
+	}
+	var resp errorPayload
+	if err := json.Unmarshal(pkt.Payload, &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Code != string(apperrors.SysBadRequest) || resp.Retryable {
+		t.Fatalf("unexpected recall error response: %+v", resp)
+	}
+}
+
 func TestWebSocketRouteRegistered(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -524,4 +604,8 @@ func (errorSender) Send(context.Context, message.SendRequest) (message.SendRespo
 
 func (errorSender) Sync(context.Context, uint64, uint64, int) ([]message.Message, error) {
 	return nil, nil
+}
+
+func (errorSender) Recall(context.Context, message.RecallRequest) (message.Message, error) {
+	return message.Message{}, nil
 }

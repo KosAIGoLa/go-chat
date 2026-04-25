@@ -7,6 +7,14 @@ const (
 	ConversationTypeGroup  ConversationType = 2
 )
 
+type MessageStatus uint8
+
+const (
+	MessageStatusNormal   MessageStatus = 0
+	MessageStatusRecalled MessageStatus = 1
+	MessageStatusDeleted  MessageStatus = 2
+)
+
 type Message struct {
 	ID             uint64
 	ConversationID uint64
@@ -17,4 +25,6 @@ type Message struct {
 	Type           int32
 	Payload        []byte
 	CreatedAtMs    int64
+	Status         MessageStatus
+	RecalledAtMs   int64
 }

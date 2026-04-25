@@ -2,7 +2,9 @@ package message
 
 import (
 	"context"
+	"errors"
 
+	apperrors "github.com/ck-chat/ck-chat/internal/errors"
 	"gorm.io/gorm"
 )
 
@@ -16,6 +18,8 @@ type GORMMessage struct {
 	Type           int32  `gorm:"not null"`
 	Payload        []byte `gorm:"type:blob"`
 	CreatedAtMs    int64  `gorm:"index;not null"`
+	Status         uint8  `gorm:"not null;default:0"`
+	RecalledAtMs   int64  `gorm:"not null;default:0"`
 }
 
 func (GORMMessage) TableName() string { return "messages" }
@@ -41,7 +45,49 @@ func (s *GORMStore) Save(ctx context.Context, msg Message) error {
 		Type:           msg.Type,
 		Payload:        append([]byte(nil), msg.Payload...),
 		CreatedAtMs:    msg.CreatedAtMs,
+		Status:         uint8(msg.Status),
+		RecalledAtMs:   msg.RecalledAtMs,
 	}).Error
+}
+
+func (s *GORMStore) Get(ctx context.Context, msgID uint64) (Message, error) {
+	var row GORMMessage
+	if err := s.db.WithContext(ctx).First(&row, msgID).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return Message{}, apperrors.AppError{Code: apperrors.MsgNotFound}
+		}
+		return Message{}, err
+	}
+	return Message{
+		ID:             row.ID,
+		ConversationID: row.ConversationID,
+		Seq:            row.Seq,
+		SenderID:       row.SenderID,
+		SenderDeviceID: row.SenderDeviceID,
+		ClientMsgID:    row.ClientMsgID,
+		Type:           row.Type,
+		Payload:        append([]byte(nil), row.Payload...),
+		CreatedAtMs:    row.CreatedAtMs,
+		Status:         MessageStatus(row.Status),
+		RecalledAtMs:   row.RecalledAtMs,
+	}, nil
+}
+
+func (s *GORMStore) Recall(ctx context.Context, msgID uint64, recalledAtMs int64) error {
+	result := s.db.WithContext(ctx).
+		Model(&GORMMessage{}).
+		Where("id = ?", msgID).
+		Updates(map[string]interface{}{
+			"status":         uint8(MessageStatusRecalled),
+			"recalled_at_ms": recalledAtMs,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected == 0 {
+		return apperrors.AppError{Code: apperrors.MsgNotFound}
+	}
+	return nil
 }
 
 func (s *GORMStore) ListAfter(ctx context.Context, conversationID, fromSeq uint64, limit int) ([]Message, error) {
@@ -65,6 +111,8 @@ func (s *GORMStore) ListAfter(ctx context.Context, conversationID, fromSeq uint6
 			Type:           row.Type,
 			Payload:        append([]byte(nil), row.Payload...),
 			CreatedAtMs:    row.CreatedAtMs,
+			Status:         MessageStatus(row.Status),
+			RecalledAtMs:   row.RecalledAtMs,
 		})
 	}
 	return out, nil

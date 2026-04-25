@@ -34,6 +34,7 @@ func (h *HTTPHandler) WithRateLimiter(limiter *ratelimit.Limiter) *HTTPHandler {
 func (h *HTTPHandler) Register(router gin.IRouter) {
 	router.POST("/api/v1/messages", h.send)
 	router.GET("/api/v1/conversations/:conversation_id/messages", h.sync)
+	router.POST("/api/v1/messages/:msg_id/recall", h.recall)
 }
 
 type sendMessageJSON struct {
@@ -45,16 +46,22 @@ type sendMessageJSON struct {
 	Payload        string `json:"payload"`
 }
 
+type recallMessageJSON struct {
+	SenderID uint64 `json:"sender_id"`
+}
+
 type messageJSON struct {
-	ID             uint64 `json:"msg_id"`
-	ConversationID uint64 `json:"conversation_id"`
-	Seq            uint64 `json:"seq"`
-	SenderID       uint64 `json:"sender_id"`
-	SenderDeviceID string `json:"sender_device_id"`
-	ClientMsgID    string `json:"client_msg_id"`
-	Type           int32  `json:"type"`
-	Payload        string `json:"payload"`
-	CreatedAtMs    int64  `json:"created_at_ms"`
+	ID             uint64        `json:"msg_id"`
+	ConversationID uint64        `json:"conversation_id"`
+	Seq            uint64        `json:"seq"`
+	SenderID       uint64        `json:"sender_id"`
+	SenderDeviceID string        `json:"sender_device_id"`
+	ClientMsgID    string        `json:"client_msg_id"`
+	Type           int32         `json:"type"`
+	Payload        string        `json:"payload"`
+	CreatedAtMs    int64         `json:"created_at_ms"`
+	Status         MessageStatus `json:"status"`
+	RecalledAtMs   int64         `json:"recalled_at_ms,omitempty"`
 }
 
 type sendMessageResponseJSON struct {
@@ -128,8 +135,49 @@ func (h *HTTPHandler) sync(c *gin.Context) {
 	httpapi.GinJSON(c, http.StatusOK, syncMessagesResponseJSON{Messages: out, HasMore: len(out) == limit && limit > 0})
 }
 
+func (h *HTTPHandler) recall(c *gin.Context) {
+	msgID, err := strconv.ParseUint(c.Param("msg_id"), 10, 64)
+	if err != nil {
+		httpapi.GinError(c, http.StatusBadRequest, err)
+		return
+	}
+
+	var senderID uint64
+	principal, ok := auth.PrincipalFromContext(c.Request.Context())
+	if ok {
+		senderID = principal.UserID
+	} else {
+		var body recallMessageJSON
+		if err := c.ShouldBindJSON(&body); err == nil {
+			senderID = body.SenderID
+		}
+	}
+
+	msg, err := h.service.Recall(c.Request.Context(), RecallRequest{
+		MessageID: msgID,
+		SenderID:  senderID,
+	})
+	if err != nil {
+		httpapi.GinError(c, httpStatusFor(err), err)
+		return
+	}
+	httpapi.GinJSON(c, http.StatusOK, gin.H{"message": toJSON(msg)})
+}
+
 func toJSON(msg Message) messageJSON {
-	return messageJSON{ID: msg.ID, ConversationID: msg.ConversationID, Seq: msg.Seq, SenderID: msg.SenderID, SenderDeviceID: msg.SenderDeviceID, ClientMsgID: msg.ClientMsgID, Type: msg.Type, Payload: base64.StdEncoding.EncodeToString(msg.Payload), CreatedAtMs: msg.CreatedAtMs}
+	return messageJSON{
+		ID:             msg.ID,
+		ConversationID: msg.ConversationID,
+		Seq:            msg.Seq,
+		SenderID:       msg.SenderID,
+		SenderDeviceID: msg.SenderDeviceID,
+		ClientMsgID:    msg.ClientMsgID,
+		Type:           msg.Type,
+		Payload:        base64.StdEncoding.EncodeToString(msg.Payload),
+		CreatedAtMs:    msg.CreatedAtMs,
+		Status:         msg.Status,
+		RecalledAtMs:   msg.RecalledAtMs,
+	}
 }
 
 func sendLimitKey(req sendMessageJSON, principal auth.Principal, authenticated bool, r *http.Request) string {
@@ -149,6 +197,10 @@ func httpStatusFor(err error) int {
 			return http.StatusTooManyRequests
 		case apperrors.SysUnavailable, apperrors.MsgQueueFailed:
 			return http.StatusServiceUnavailable
+		case apperrors.MsgNotFound:
+			return http.StatusNotFound
+		case apperrors.MsgRecallNotAllowed:
+			return http.StatusForbidden
 		}
 	}
 	return http.StatusBadRequest

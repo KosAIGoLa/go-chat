@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	apperrors "github.com/ck-chat/ck-chat/internal/errors"
 	"github.com/ck-chat/ck-chat/internal/sequence"
 )
 
@@ -37,5 +38,76 @@ func TestServiceSync(t *testing.T) {
 	}
 	if len(messages) != 2 || messages[0].Seq != 2 || messages[1].Seq != 3 {
 		t.Fatalf("unexpected messages: %+v", messages)
+	}
+}
+
+func TestServiceRecall(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "r1", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recalled, err := svc.Recall(context.Background(), RecallRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  20,
+	})
+	if err != nil {
+		t.Fatalf("unexpected recall error: %v", err)
+	}
+	if recalled.Status != MessageStatusRecalled {
+		t.Fatalf("expected recalled status, got %v", recalled.Status)
+	}
+	if recalled.RecalledAtMs == 0 {
+		t.Fatal("expected non-zero RecalledAtMs")
+	}
+
+	// Verify sync returns the recalled message
+	msgs, err := svc.Sync(context.Background(), 10, 1, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) == 0 {
+		t.Fatal("expected at least one message from sync")
+	}
+	if msgs[0].Status != MessageStatusRecalled {
+		t.Fatalf("synced message should be recalled, got status=%v", msgs[0].Status)
+	}
+}
+
+func TestServiceRecallRejectsNonSender(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+	resp, err := svc.Send(context.Background(), SendRequest{
+		ConversationID: 10, SenderID: 20, SenderDeviceID: "ios", ClientMsgID: "r2", Type: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = svc.Recall(context.Background(), RecallRequest{
+		MessageID: resp.Message.ID,
+		SenderID:  21,
+	})
+	if err == nil {
+		t.Fatal("expected error for non-sender recall")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.MsgRecallNotAllowed {
+		t.Fatalf("expected MsgRecallNotAllowed, got %v", err)
+	}
+}
+
+func TestServiceRecallRequiresIDs(t *testing.T) {
+	svc := NewService(sequence.NewAllocator(), NewMemoryStore())
+
+	_, err := svc.Recall(context.Background(), RecallRequest{})
+	if err == nil {
+		t.Fatal("expected error for empty recall request")
+	}
+	appErr, ok := err.(apperrors.AppError)
+	if !ok || appErr.Code != apperrors.SysBadRequest {
+		t.Fatalf("expected SysBadRequest, got %v", err)
 	}
 }
